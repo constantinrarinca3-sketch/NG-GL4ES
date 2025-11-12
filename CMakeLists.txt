@@ -101,9 +101,9 @@ set(C_SRC_FILES
         src/gl/libtxc_dxtn/txc_compress_dxtn.c
         )
 
-if(NOT ANDROID)
+#if(NOT ANDROID)
     list(APPEND C_SRC_FILES src/glx/glx.c)
-endif()
+#endif()
 
 set(CPP_SRC_FILES
         src/gl/glsl/glsl_for_es.cpp
