@@ -350,7 +350,15 @@ extern "C"
 
     void init_internal_glDrawElementsBaseVertex();
     void set_es_version() {
-        LOAD_GLES(glGetString);
+        LOAD_GLES(glGetString);       
+
+        // FIX: if raw == NULL → fallback to GLES 3.0
+        if (!raw) {
+            SHUT_LOGD("WARNING: glGetString(GL_VERSION) returned NULL (no current context), using fallback GLES 3.0");
+            globals4es.esversion = 300;     // ← 3.0 в формате GL4ES (major*100 + minor*10)
+            return;
+        }
+
         const char* ESVersion = getBeforeThirdSpace((const char*)gles_glGetString(GL_VERSION));
         int major, minor;
 
