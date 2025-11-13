@@ -297,6 +297,14 @@ extern "C"
     }
 
     char* getBeforeThirdSpace(const char* str) {
+        if (!str) {
+            // If no str we'll return something like "OpenGL ES 3.0" as a default.
+            char* result = (char*)malloc(13);
+            if (result) {
+                strcpy(result, "OpenGL ES 3.0");
+            }
+            return result;
+        }
         int spaceCount = 0;
         const char* start = str;
         while (*str) {
@@ -387,7 +395,22 @@ extern "C"
         // 🔥 FIX if NULL, no current context
         if (!ESVersion) {
             SHUT_LOGD("WARNING: glGetString(GL_VERSION) returned NULL in getGLESName, using fallback string");
-            return "OpenGL ES 3.0";
+
+            int major = 3;
+            int minor = 0;
+    
+            if (globals4es.esversion) {
+                major = globals4es.esversion / 100;
+                minor = (globals4es.esversion / 10) % 10;
+            } else if (globals4es.es) {
+                major = globals4es.es;
+                minor = 0;
+            }
+
+            static char fallback[32];
+            snprintf(fallback, sizeof(fallback), "OpenGL ES %d.%d", major, minor);
+            return fallback;
+            //return "OpenGL ES 3.0";
         }
 
         return getBeforeThirdSpace(ESVersion);
