@@ -384,6 +384,12 @@ extern "C"
         LOAD_GLES2(glGetString);
         const char* ESVersion = (const char*)gles_glGetString(GL_VERSION);
 
+        // 🔥 FIX if NULL, no current context
+        if (!ESVersion) {
+            SHUT_LOGD("WARNING: glGetString(GL_VERSION) returned NULL in getGLESName, using fallback string");
+            return "OpenGL ES 3.0";
+        }
+
         return getBeforeThirdSpace(ESVersion);
     }
 
