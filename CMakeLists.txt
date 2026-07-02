@@ -14,7 +14,12 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fvisibility=hidden")
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fPIC -DNO_GBM -DDEFAULT_ES=3 -fvisibility=hidden")
+# ZOMDROID: june16's old vgpu shaderconv overflows a stack buffer while inserting the
+# GLSL wrapper block (caught by the NDK default -fstack-protector-strong -> abort).
+# June16-era builds ran WITHOUT the protector and survived in practice; restore that.
+# DEBT: fix the overflow properly or replace shaderconv with the newer one.
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fPIC -DNO_GBM -DDEFAULT_ES=3 -fvisibility=hidden -fno-stack-protector")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-stack-protector")
 
 if(ANDROID)
         set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DNOX11")

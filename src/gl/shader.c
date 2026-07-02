@@ -22,10 +22,173 @@
 
 KHASH_MAP_IMPL_INT(shaderlist, shader_t*);
 
+// ============================================================
+// FIX: strip_uniform_initializers
+//
+// Project Zomboid build 42 shaders use GLSL 1.20 syntax where
+// uniforms can have default values, e.g.:
+//   uniform float chunkDepth = 0.0;
+//   uniform int useTexture = 1;
+//
+// This is valid in desktop GLSL but ILLEGAL in GLSL ES (any version).
+// The SPIRV-Cross / ConvertShader pipeline does NOT strip these,
+// so Adreno (and other mobile drivers) reject the shader with:
+//   ERROR: 'uniform' : cannot initialize this type of qualifier
+//
+// This function removes the "= <value>" part from uniform declarations,
+// converting them to plain declarations that GLSL ES accepts.
+//
+// Called after every conversion path in gl4es_glShaderSource and redoShader.
+// Safe to call on shaders that have no initializers — it's a no-op for those.
+// ============================================================
+static char* strip_uniform_initializers(char* src) {
+    if (!src) return src;
+
+    size_t len = strlen(src);
+    char* result = (char*)malloc(len + 1);
+    if (!result) return src;
+
+    const char* in = src;
+    char* out = result;
+
+    while (*in) {
+        const char* uni = strstr(in, "uniform");
+        if (!uni) {
+            size_t rest = strlen(in);
+            memcpy(out, in, rest);
+            out += rest;
+            break;
+        }
+
+        if (uni != in) {
+            char prev = *(uni - 1);
+            if (isalnum((unsigned char)prev) || prev == '_') {
+                size_t chunk = (uni - in) + 1;
+                memcpy(out, in, chunk);
+                out += chunk;
+                in = uni + 1;
+                continue;
+            }
+        }
+
+        char after = *(uni + 7);
+        if (isalnum((unsigned char)after) || after == '_') {
+            size_t chunk = (uni - in) + 8;
+            memcpy(out, in, chunk);
+            out += chunk;
+            in = uni + 8;
+            continue;
+        }
+
+        const char* semi = strchr(uni, ';');
+        if (!semi) {
+            size_t rest = strlen(in);
+            memcpy(out, in, rest);
+            out += rest;
+            break;
+        }
+
+        const char* eq = NULL;
+        for (const char* p = uni + 7; p < semi; p++) {
+            if (*p == '=') {
+                char next = *(p + 1);
+                char prev = (p > uni + 7) ? *(p - 1) : '\0';
+                if (next == '=' || prev == '!' || prev == '<' || prev == '>')
+                    continue;
+                eq = p;
+                break;
+            }
+        }
+
+        if (eq) {
+            size_t keep = eq - in;
+            memcpy(out, in, keep);
+            out += keep;
+            *out++ = ';';
+            in = semi + 1;
+            SHUT_LOGD("strip_uniform_initializers: removed default value from uniform declaration\n");
+        } else {
+            size_t chunk = (semi - in) + 1;
+            memcpy(out, in, chunk);
+            out += chunk;
+            in = semi + 1;
+        }
+    }
+
+    *out = '\0';
+    free(src);
+    return result;
+}
+// ============================================================
+// END FIX: strip_uniform_initializers
+// ============================================================
+
+static char* strip_texture_lod_bias(char* src, int is_fragment) {
+    if (!src || !is_fragment) return src;
+
+    size_t len = strlen(src);
+    char* result = (char*)malloc(len + 1);
+    if (!result) return src;
+
+    const char* in = src;
+    char* out = result;
+
+    while (*in) {
+        const char* tex = strstr(in, "texture(");
+        if (!tex) {
+            size_t rest = strlen(in);
+            memcpy(out, in, rest);
+            out += rest;
+            break;
+        }
+
+        // Copy up to and including "texture("
+        size_t chunk = (tex - in) + 8;
+        memcpy(out, in, chunk);
+        out += chunk;
+        in = tex + 8;
+
+        // Find the closing paren, count args
+        int depth = 1;
+        const char* p = in;
+        const char* second_comma = NULL;
+        int commas = 0;
+        while (*p && depth > 0) {
+            if (*p == '(') depth++;
+            else if (*p == ')') { depth--; if (depth == 0) break; }
+            else if (*p == ',' && depth == 1) {
+                commas++;
+                if (commas == 2) second_comma = p;
+            }
+            p++;
+        }
+
+        if (second_comma && *p == ')') {
+            // 3 args — copy only up to second comma, then add ")"
+            size_t keep = second_comma - in;
+            memcpy(out, in, keep);
+            out += keep;
+            *out++ = ')';
+            in = p + 1;
+        } else {
+            // 2 args or malformed — copy as-is up to closing paren
+            size_t keep = p - in + (*p == ')' ? 1 : 0);
+            memcpy(out, in, keep);
+            out += keep;
+            in = p + (*p == ')' ? 1 : 0);
+        }
+    }
+
+    *out = '\0';
+    free(src);
+    return result;
+}
+
 GLuint APIENTRY_GL4ES gl4es_glCreateShader(GLenum shaderType) {
     DBG(SHUT_LOGD("glCreateShader(%s)\n", PrintEnum(shaderType)))
     // sanity check
-    if (shaderType != GL_VERTEX_SHADER && shaderType != GL_FRAGMENT_SHADER  && shaderType != GL_GEOMETRY_SHADER) {
+    if (shaderType != GL_VERTEX_SHADER && shaderType != GL_FRAGMENT_SHADER && shaderType != GL_GEOMETRY_SHADER &&
+        shaderType != GL_COMPUTE_SHADER) {
         DBG(SHUT_LOGD("Invalid shader type\n"))
         errorShim(GL_INVALID_ENUM);
         return 0;
@@ -117,6 +280,19 @@ void APIENTRY_GL4ES gl4es_glDeleteShader(GLuint shader) {
     }
 }
 
+#define LOG_CHUNK_SIZE 4000
+
+void log_long_shader(const char* tag, const char* text) {
+    size_t len = strlen(text);
+    for (size_t i = 0; i < len; i += LOG_CHUNK_SIZE) {
+        size_t chunk_len = (i + LOG_CHUNK_SIZE < len) ? LOG_CHUNK_SIZE : (len - i);
+        char buffer[LOG_CHUNK_SIZE + 1];
+        memcpy(buffer, text + i, chunk_len);
+        buffer[chunk_len] = '\0';
+        SHUT_LOGD("%s", buffer);
+    }
+}
+
 void APIENTRY_GL4ES gl4es_glCompileShader(GLuint shader) {
     DBG(SHUT_LOGD("glCompileShader(%d)\n", shader))
     // look for the shader
@@ -134,10 +310,11 @@ void APIENTRY_GL4ES gl4es_glCompileShader(GLuint shader) {
             LOAD_GLES2(glGetShaderInfoLog);
             GLint status = 0;
             gles_glGetShaderiv(glshader->id, GL_COMPILE_STATUS, &status);
+            SHUT_LOGD("ZOMDROID_DBG: glCompileShader id=%d status=%d\n", glshader->id, status);
             if (status != GL_TRUE) {
-                SHUT_LOGD("LIBGL: Error while compiling shader %d. Original source is:\n%s\n=======\n", glshader->id,
-                          glshader->source);
-                SHUT_LOGD("ShaderConv Source is:\n%s\n=======\n", glshader->converted);
+                DBG(SHUT_LOGD("LIBGL: Error while compiling shader %d. Original source is:\n%s\n=======\n",
+                              glshader->id, glshader->source);)
+                DBG(SHUT_LOGD("ShaderConv Source is:\n%s\n=======\n", glshader->converted);)
                 char tmp[500];
                 GLint length;
                 gles_glGetShaderInfoLog(glshader->id, 500, &length, tmp);
@@ -180,7 +357,7 @@ char* replace_version_line(const char* text) {
 
     const char* line_start = text;
     const char* p = text;
-    const char* replace_str = "#version 150 compatibility\n";
+    const char* replace_str = "#version 330 compatibility\n";
     size_t replace_len = strlen(replace_str);
 
     while (*p) {
@@ -211,7 +388,7 @@ char* replace_version_line(const char* text) {
     return strdup(text);
 }
 
-char* replace_version_line_460(const char* text) {
+char* replace_version_line_460(char* text) {
     const char* new_version = "#version 460\n";
     if (!text || !new_version) return NULL;
 
@@ -261,6 +438,100 @@ char* replace_version_line_460(const char* text) {
 
     return strdup(text);
 }
+
+static char* force_replace_version(const char* text, const char* new_version_line) {
+    if (!text) return NULL;
+
+    const char* version_tag = "#version";
+    const char* p = text;
+    // Skip leading whitespace
+    while (*p && isspace((unsigned char)*p)) p++;
+
+    // Check if the source starts with #version
+    if (strncmp(p, version_tag, strlen(version_tag)) == 0) {
+        const char* first_line_end = strchr(p, '\n');
+        if (!first_line_end) {
+            first_line_end = p + strlen(p); // Handle single-line shaders
+        }
+
+        // Calculate the start of the rest of the code
+        const char* rest_of_code = first_line_end;
+        if (*rest_of_code == '\n') {
+            rest_of_code++; // Move past the newline character
+        }
+
+        // Allocate memory and build the new shader string
+        size_t new_version_len = strlen(new_version_line);
+        size_t rest_len = strlen(rest_of_code);
+        char* new_text = (char*)malloc(new_version_len + 1 + rest_len + 1); // +1 for newline, +1 for null terminator
+        if (!new_text) return NULL;
+
+        strcpy(new_text, new_version_line);
+        strcat(new_text, "\n");
+        strcat(new_text, rest_of_code);
+
+        return new_text;
+    }
+
+    // If #version is not found at the beginning, insert the new version line at the top
+    size_t text_len = strlen(text);
+    size_t new_version_len = strlen(new_version_line);
+    char* new_text = (char*)malloc(new_version_len + 1 + text_len + 1);
+    if (!new_text) return NULL;
+
+    strcpy(new_text, new_version_line);
+    strcat(new_text, "\n");
+    strcat(new_text, text);
+
+    return new_text;
+}
+
+static char* insert_after_preamble(const char* text, const char* insert_str) {
+    if (!text || !insert_str) return NULL;
+
+    const char* p = text;
+    const char* last_preamble_pos = text;
+
+    // Find the end of the preamble (all lines starting with #, comments, or are empty)
+    while (*p) {
+        const char* line_start = p;
+
+        // Skip leading whitespace
+        while (*p && (*p == ' ' || *p == '\t')) p++;
+
+        if (*p == '#' || (*p == '/' && *(p+1) == '/') || *p == '\n' || *p == '\r' || *p == '\0') {
+            // This line is a preprocessor, comment, or empty. Continue.
+            const char* line_end = strchr(line_start, '\n');
+            if (line_end) {
+                p = line_end + 1;
+                last_preamble_pos = p;
+            } else {
+                // End of string
+                last_preamble_pos = p + strlen(p);
+                break;
+            }
+        } else {
+            // First line of actual code found. We should insert before it.
+            break;
+        }
+    }
+
+    // Now, build the new string
+    size_t head_len = last_preamble_pos - text;
+    size_t insert_len = strlen(insert_str);
+    size_t tail_len = strlen(last_preamble_pos);
+
+    char* new_text = (char*)malloc(head_len + insert_len + tail_len + 1);
+    if (!new_text) return NULL;
+
+    memcpy(new_text, text, head_len);
+    memcpy(new_text + head_len, insert_str, insert_len);
+    memcpy(new_text + head_len + insert_len, last_preamble_pos, tail_len);
+    new_text[head_len + insert_len + tail_len] = '\0';
+
+    return new_text;
+}
+
 
 bool check_version_compatibility(const char* str) {
     if (str == NULL) {
@@ -358,10 +629,10 @@ char* replace_glFragColor(const char* src) {
     char* dst_p = result;
     while ((p = strstr(src_p, target)) != NULL) {
         int valid =
-            (p == src_p || !((p[-1] >= 'a' && p[-1] <= 'z') || (p[-1] >= 'A' && p[-1] <= 'Z') ||
-                             (p[-1] >= '0' && p[-1] <= '9') || p[-1] == '_')) &&
-            !((p[target_len] >= 'a' && p[target_len] <= 'z') || (p[target_len] >= 'A' && p[target_len] <= 'Z') ||
-              (p[target_len] >= '0' && p[target_len] <= '9') || p[target_len] == '_');
+                (p == src_p || !((p[-1] >= 'a' && p[-1] <= 'z') || (p[-1] >= 'A' && p[-1] <= 'Z') ||
+                                 (p[-1] >= '0' && p[-1] <= '9') || p[-1] == '_')) &&
+                !((p[target_len] >= 'a' && p[target_len] <= 'z') || (p[target_len] >= 'A' && p[target_len] <= 'Z') ||
+                  (p[target_len] >= '0' && p[target_len] <= '9') || p[target_len] == '_');
         size_t copy_len = p - src_p;
         memcpy(dst_p, src_p, copy_len);
         dst_p += copy_len;
@@ -706,19 +977,26 @@ void APIENTRY_GL4ES gl4es_glShaderSource(GLuint shader, GLsizei count, const GLc
         int isFPEShader = (strstr(glshader->source, fpeshader_signature) != NULL) ? 1 : 0;
         // adapt shader if needed (i.e. not an es2 context and shader is not #version 100)
         if (is_direct_shader(glshader->source)) {
+            SHUT_LOGD("ZOMDROID_DBG: shader=%d path=DIRECT\n", shader);
             glshader->converted = strdup(glshader->source);
         } else if (globals4es.simple_shaderconv && !isFPEShader) {
-                glshader->converted = strdup(ConvertShaderConditionally(glshader));
-                glshader->is_converted_essl_320 = 0;
+            SHUT_LOGD("ZOMDROID_DBG: shader=%d path=SIMPLE_SHADERCONV\n", shader);glshader->converted = strip_uniform_initializers(glshader->converted);
+            glshader->source = strip_uniform_initializers(glshader->source);
+            glshader->converted = strip_texture_lod_bias(glshader->converted,
+                                                         glshader->type == GL_FRAGMENT_SHADER ? 1 : 0);
+            glshader->converted = strdup(ConvertShaderConditionally(glshader));
+            glshader->is_converted_essl_320 = 0;
+
         } else {
             int glsl_version = getGLSLVersion(glshader->source);
             DBG(SHUT_LOGD("[INFO] [Shader] Shader source: "))
             DBG(SHUT_LOGD("%s", glshader->source))
-            if (glsl_version < 140 && !isFPEShader) {
-                glshader->source = replace_version_line(glshader->source);
-                glsl_version = 460;
-            }
-            if (glsl_version < 140 || globals4es.esversion < 300) {
+//            int isFPEShader = (strstr(glshader->source, fpeshader_signature) != NULL) ? 1 : 0;
+//            if (glsl_version < 140 && !isFPEShader) {
+            //              glshader->source = replace_version_line(glshader->source);
+            //            glsl_version = 460;
+            //      }
+            if (glsl_version < 140 || (globals4es.es < 3 && globals4es.esversion < 300)) {
                 glshader->converted = strdup(ConvertShaderConditionally(glshader));
                 glshader->is_converted_essl_320 = 0;
             } else {
@@ -726,9 +1004,11 @@ void APIENTRY_GL4ES gl4es_glShaderSource(GLuint shader, GLsizei count, const GLc
                     // bool isBSL = first_three_lines_contains_BSL(glshader->source);
                     bool isBuiltInVariableConverted = is_glsl_builtin_converted(glshader->source);
                     remove_before_version(glshader->source);
-                    char* convertedSource =
-                        ConvertShaderBuiltInVariableOnly(glshader->source, glshader->type == GL_VERTEX_SHADER ? 1 : 0,
-                                                         &glshader->need, isBuiltInVariableConverted ? 0 : 1);
+                    char* convertedSource = glshader->source;
+                    if (!isBuiltInVariableConverted)
+                        convertedSource = ConvertShaderBuiltInVariableOnly(
+                                convertedSource, glshader->type == GL_VERTEX_SHADER ? 1 : 0, &glshader->need,
+                                isBuiltInVariableConverted ? 0 : 1);
                     free(glshader->source);
                     if (glshader->type == GL_FRAGMENT_SHADER) {
                         if (contains_glFragColor(glshader->source)) {
@@ -747,11 +1027,11 @@ void APIENTRY_GL4ES gl4es_glShaderSource(GLuint shader, GLsizei count, const GLc
                                                   &returnCode);
                     free(convertedSource);
                     glshader->converted =
-                        strdup(result != NULL ? process_uniform_declarations(result, glshader->uniforms_declarations,
-                                                                             &glshader->uniforms_declarations_count)
-                                              : ConvertShaderConditionally(glshader));
+                            strdup(result != NULL ? process_uniform_declarations(result, glshader->uniforms_declarations,
+                                                                                 &glshader->uniforms_declarations_count)
+                                                  : ConvertShaderConditionally(glshader));
                     glshader->converted = process_uniform_declarations(
-                        glshader->converted, glshader->uniforms_declarations, &glshader->uniforms_declarations_count);
+                            glshader->converted, glshader->uniforms_declarations, &glshader->uniforms_declarations_count);
 
                     /*if (isBSL)*/ glshader->converted = bsl_patch(glshader->converted);
                     glshader->is_converted_essl_320 = 0;
@@ -760,13 +1040,86 @@ void APIENTRY_GL4ES gl4es_glShaderSource(GLuint shader, GLsizei count, const GLc
                     char* result = GLSLtoGLSLES_c(glshader->source, glshader->type, globals4es.esversion, glsl_version,
                                                   &returnCode);
                     glshader->converted =
-                        strdup(result != NULL ? process_uniform_declarations(result, glshader->uniforms_declarations,
-                                                                             &glshader->uniforms_declarations_count)
-                                              : ConvertShaderConditionally(glshader));
+                            strdup(result != NULL ? process_uniform_declarations(result, glshader->uniforms_declarations,
+                                                                                 &glshader->uniforms_declarations_count)
+                                                  : ConvertShaderConditionally(glshader));
                     glshader->is_converted_essl_320 = 1;
                 }
             }
+
             DBG(SHUT_LOGD("\n[INFO] [Shader] Converted Shader source: \n%s", glshader->converted))
+
+
+            // ===================================================================
+            // === BEGIN ULTIMATE FIXUP PATCH v10 (The Final Stroke)
+            // ===================================================================
+            if (glshader->converted && (glshader->type == GL_VERTEX_SHADER || glshader->type == GL_FRAGMENT_SHADER)) {
+                //SHUT_LOGD("LIBGL: Executing ULTIMATE FIXUP PATCH v10 on Shader ID %d (Type: %s)\n", glshader->id, (glshader->type == GL_VERTEX_SHADER) ? "Vertex" : "Fragment");
+
+                // Part 1: Force the correct GLSL ES version for BOTH shaders
+                char target_version[32];
+                if (globals4es.esversion >= 320) sprintf(target_version, "#version 320 es");
+                else if (globals4es.esversion >= 310) sprintf(target_version, "#version 310 es");
+                else sprintf(target_version, "#version 300 es");
+
+                char* temp_v = force_replace_version(glshader->converted, target_version);
+                if (temp_v) { free(glshader->converted); glshader->converted = temp_v; }
+
+                // Part 2: Replace old texture2D with modern texture() for BOTH shaders
+                if (strstr(glshader->converted, "texture2D")) {
+                    char* temp_tex = replace_all(glshader->converted, "texture2D", "texture");
+                    if (temp_tex) { free(glshader->converted); glshader->converted = temp_tex; }
+                }
+
+                // Part 3: Handle keywords based on shader type
+                if (glshader->type == GL_VERTEX_SHADER) {
+                    // In Vertex Shaders, 'attribute' becomes 'in', and 'varying' becomes 'out'
+                    if (strstr(glshader->converted, "attribute")) {
+                        char* temp_ain = replace_all(glshader->converted, "attribute", "in");
+                        if (temp_ain) { free(glshader->converted); glshader->converted = temp_ain; }
+                    }
+                    if (strstr(glshader->converted, "varying")) {
+                        char* temp_vout = replace_all(glshader->converted, "varying", "out");
+                        if (temp_vout) { free(glshader->converted); glshader->converted = temp_vout; }
+                    }
+                } else { // This is a GL_FRAGMENT_SHADER
+                    // Part 3.5: Add the mandatory default precision for floats in Fragment Shaders
+                    if (!strstr(glshader->converted, "precision highp float")) {
+                        const char* precision_qualifier = "\nprecision highp float;\n";
+                        char* temp_prec = insert_after_first(glshader->converted, "\n", precision_qualifier);
+                        if (temp_prec) { free(glshader->converted); glshader->converted = temp_prec; }
+                    }
+
+                    // In Fragment Shaders, 'varying' becomes 'in'
+                    if (strstr(glshader->converted, "varying")) {
+                        char* temp_vin = replace_all(glshader->converted, "varying", "in");
+                        if (temp_vin) { free(glshader->converted); glshader->converted = temp_vin; }
+                    }
+
+                    // Part 4: Handle fragment-specific outputs (gl_FragColor/Data)
+                    const char* custom_out_var = "fragColor";
+                    int needs_out_declaration = 0;
+
+                    if (strstr(glshader->converted, "gl_FragColor")) {
+                        char* temp_fc = replace_all(glshader->converted, "gl_FragColor", custom_out_var);
+                        if (temp_fc) { free(glshader->converted); glshader->converted = temp_fc; needs_out_declaration = 1; }
+                    }
+                    if (strstr(glshader->converted, "gl_FragData[0]")) {
+                        char* temp_fd = replace_all(glshader->converted, "gl_FragData[0]", custom_out_var);
+                        if (temp_fd) { free(glshader->converted); glshader->converted = temp_fd; needs_out_declaration = 1; }
+                    }
+
+                    // If we need to declare our variable, do it smartly with precision
+                    if (needs_out_declaration && !strstr(glshader->converted, "out vec4 fragColor")) {
+                        const char* declaration = "\nout highp vec4 fragColor;\n";
+                        char* temp_decl = insert_after_preamble(glshader->converted, declaration);
+                        if (temp_decl) { free(glshader->converted); glshader->converted = temp_decl; }
+                    }
+                }
+            }
+            // ===================================================================
+            // === END ULTIMATE FIXUP PATCH v10
+            // ===================================================================
         }
 
         GLchar* finalSource = (glshader->converted) ? glshader->converted : glshader->source;
@@ -779,6 +1132,7 @@ void APIENTRY_GL4ES gl4es_glShaderSource(GLuint shader, GLsizei count, const GLc
             }
         }
         const GLchar* sources[] = {finalSource};
+        SHUT_LOGD("ZOMDROID_DBG: shader=%d type=%d final source:\n%s\n", shader, glshader->type, finalSource);
         gles_glShaderSource(shader, 1, sources, NULL);
         if (tempSource) free(tempSource);
 
@@ -845,18 +1199,18 @@ void redoShader(GLuint shader, shaderconv_need_t* need) {
         } else {
             int returnCode = 0;
             char* result =
-                GLSLtoGLSLES_c(glshader->source, glshader->type, globals4es.esversion, glsl_version, &returnCode);
+                    GLSLtoGLSLES_c(glshader->source, glshader->type, globals4es.esversion, glsl_version, &returnCode);
             glshader->converted =
-                strdup(result != NULL ? process_uniform_declarations(result, glshader->uniforms_declarations,
-                                                                     &glshader->uniforms_declarations_count)
-                                      : ConvertShaderConditionally(glshader));
+                    strdup(result != NULL ? process_uniform_declarations(result, glshader->uniforms_declarations,
+                                                                         &glshader->uniforms_declarations_count)
+                                          : ConvertShaderConditionally(glshader));
             glshader->is_converted_essl_320 = 1;
         }
         DBG(SHUT_LOGD("\n[INFO] [Shader] Converted Shader source: \n%s", glshader->converted))
     }
     // send source to GLES2 hardware if any
     gles_glShaderSource(
-        shader, 1, (const GLchar* const*)((glshader->converted) ? (&glshader->converted) : (&glshader->source)), NULL);
+            shader, 1, (const GLchar* const*)((glshader->converted) ? (&glshader->converted) : (&glshader->source)), NULL);
     // recompile...
     gl4es_glCompileShader(glshader->id);
 }
@@ -914,10 +1268,10 @@ void APIENTRY_GL4ES gl4es_glGetShaderInfoLog(GLuint shader, GLsizei maxLength, G
     DBG(SHUT_LOGD("glGetShaderInfoLog(%d, %d, %p, %p)\n", shader, maxLength, length, infoLog))
     // find shader
     CHECK_SHADER(void, shader)
-    //if (maxLength <= 0) {
-    //    errorShim(GL_INVALID_OPERATION);
-    //    return;
-    //}
+    // if (maxLength <= 0) {
+    //     errorShim(GL_INVALID_OPERATION);
+    //     return;
+    // }
     LOAD_GLES2(glGetShaderInfoLog);
     if (gles_glGetShaderInfoLog) {
         gles_glGetShaderInfoLog(glshader->id, maxLength, length, infoLog);
@@ -935,36 +1289,36 @@ void APIENTRY_GL4ES gl4es_glGetShaderiv(GLuint shader, GLenum pname, GLint* para
     LOAD_GLES2(glGetShaderiv);
     noerrorShim();
     switch (pname) {
-    case GL_SHADER_TYPE:
-        *params = glshader->type;
-        break;
-    case GL_DELETE_STATUS:
-        *params = (glshader->deleted) ? GL_TRUE : GL_FALSE;
-        break;
-    case GL_COMPILE_STATUS:
-        if (gles_glGetShaderiv) {
-            gles_glGetShaderiv(glshader->id, pname, params);
-            errorGL();
-        } else {
-            *params = GL_FALSE; // stub, compile always fail
-        }
-        break;
-    case GL_INFO_LOG_LENGTH:
-        if (gles_glGetShaderiv) {
-            gles_glGetShaderiv(glshader->id, pname, params);
-            errorGL();
-        } else {
-            *params = strlen(GLES_NoGLSLSupport); // stub, compile always fail
-        }
-        break;
-    case GL_SHADER_SOURCE_LENGTH:
-        if (glshader->source)
-            *params = strlen(glshader->source) + 1;
-        else
-            *params = 0;
-        break;
-    default:
-        errorShim(GL_INVALID_ENUM);
+        case GL_SHADER_TYPE:
+            *params = glshader->type;
+            break;
+        case GL_DELETE_STATUS:
+            *params = (glshader->deleted) ? GL_TRUE : GL_FALSE;
+            break;
+        case GL_COMPILE_STATUS:
+            if (gles_glGetShaderiv) {
+                gles_glGetShaderiv(glshader->id, pname, params);
+                errorGL();
+            } else {
+                *params = GL_FALSE; // stub, compile always fail
+            }
+            break;
+        case GL_INFO_LOG_LENGTH:
+            if (gles_glGetShaderiv) {
+                gles_glGetShaderiv(glshader->id, pname, params);
+                errorGL();
+            } else {
+                *params = strlen(GLES_NoGLSLSupport); // stub, compile always fail
+            }
+            break;
+        case GL_SHADER_SOURCE_LENGTH:
+            if (glshader->source)
+                *params = strlen(glshader->source) + 1;
+            else
+                *params = 0;
+            break;
+        default:
+            errorShim(GL_INVALID_ENUM);
     }
 }
 

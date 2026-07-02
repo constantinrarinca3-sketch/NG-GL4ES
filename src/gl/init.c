@@ -26,6 +26,8 @@
 #include "envvars.h"
 #include "config.h"
 
+static int simpleShaderConvState = 1;
+
 #if defined(__EMSCRIPTEN__)
 #define NO_INIT_CONSTRUCTOR
 #endif
@@ -430,6 +432,9 @@ void initialize_gl4es() {
     env(LIBGL_BLENDHACK, globals4es.blendhack, "Change Blend GL_SRC_ALPHA, GL_ONE to GL_ONE, GL_ONE");
     env(LIBGL_BLENDCOLOR, globals4es.blendcolor, "Export a (faked) glBlendColor");
     env(LIBGL_NOERROR, globals4es.noerror, "glGetError() always return GL_NOERROR");
+    // ZOMDROID: PZ's Util.checkGLError aborts the render on a benign accumulated
+    // GL_INVALID_VALUE, causing a black screen. Force noerror so PZ doesn't abort.
+    globals4es.noerror = 1;
 
     globals4es.silentstub = 1;
     if (IsEnvVarInt("LIBGL_SILENTSTUB", 0)) {
@@ -783,9 +788,10 @@ void initialize_gl4es() {
         globals4es.dxt = 0;
     	  break;
     }
-    globals4es.dxtmipmap = ReturnEnvVarInt("LIBGL_DXTMIPMAP");
+    globals4es.dxtmipmap = 1; //ReturnEnvVarInt("LIBGL_DXTMIPMAP");
+    globals4es.simple_shaderconv = simpleShaderConvState;
 
-    globals4es.simple_shaderconv = ReturnEnvVarInt("LIBGL_SIMPLE_SHADERCONV");
+    //globals4es.simple_shaderconv = ReturnEnvVarInt("LIBGL_SIMPLE_SHADERCONV");
     if (globals4es.simple_shaderconv == 1) SHUT_LOGD("Using simple/custom shaderconn");
     if (globals4es.simple_shaderconv == 2) SHUT_LOGD("Using simple/custom shaderconv with float hack");
 
@@ -822,6 +828,11 @@ void initialize_gl4es() {
     if (GetEnvVarFloat("LIBGL_FB_TEX_SCALE", &globals4es.fbtexscale, 0.0f)) {
         SHUT_LOGD("Framebuffer Textures will be scaled by %.2f", globals4es.fbtexscale);
     }
+}
+
+__attribute__((used)) __attribute__((visibility("default")))
+void updateSimpleShaderConvState(int shaderConvState){
+    simpleShaderConvState = shaderConvState;
 }
 
 #ifndef NOX11

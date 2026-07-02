@@ -199,6 +199,8 @@ void APIENTRY_GL4ES gl4es_glAttachShader(GLuint program, GLuint shader) {
         glprogram->last_vert = glshader;
     else if (glshader->type == GL_FRAGMENT_SHADER && !glprogram->last_frag)
         glprogram->last_frag = glshader;
+    else if (glshader->type == GL_COMPUTE_SHADER)
+        glprogram->last_comp = glshader;
     // merge uniforms_declarations
     merge_uniforms(glprogram->declarations, glshader->uniforms_declarations);
     // send to hadware
@@ -276,7 +278,7 @@ GLuint APIENTRY_GL4ES gl4es_glCreateProgram(void) {
         if (glprogram->attribloc) {
             attribloc_t* m;
             kh_foreach_value(glprogram->attribloc, m, free(m->name); free(m);)
-                kh_destroy(attribloclist, glprogram->attribloc);
+            kh_destroy(attribloclist, glprogram->attribloc);
             glprogram->attribloc = NULL;
         }
         memset(glprogram, 0, sizeof(program_t));
@@ -299,7 +301,7 @@ void deleteProgram(program_t* glprogram, khint_t k_program) {
     if (glprogram->attribloc) {
         attribloc_t* m;
         kh_foreach_value(glprogram->attribloc, m, free(m->name); free(m);)
-            kh_destroy(attribloclist, glprogram->attribloc);
+        kh_destroy(attribloclist, glprogram->attribloc);
         glprogram->attribloc = NULL;
     }
     // clean uniform list
@@ -371,19 +373,19 @@ void APIENTRY_GL4ES gl4es_glGetActiveAttrib(GLuint program, GLuint index, GLsize
     if (glprogram->attribloc) {
         attribloc_t* attribloc;
         kh_foreach_value(
-            glprogram->attribloc, attribloc, if (attribloc->real_index == index) {
-                if (type) *type = attribloc->type;
-                if (size) *size = attribloc->size;
-                if (length) *length = strlen(attribloc->glname);
-                if (bufSize && name) {
-                    strncpy(name, attribloc->glname, bufSize - 1);
-                    name[bufSize - 1] = '\0';
-                }
-                DBG(SHUT_LOGD("found, type=%s, size=%d, name=%s/%s\n", PrintEnum(attribloc->type), attribloc->size,
-                              attribloc->name, attribloc->glname))
-                noerrorShim();
-                return;
-            });
+                glprogram->attribloc, attribloc, if (attribloc->real_index == index) {
+            if (type) *type = attribloc->type;
+            if (size) *size = attribloc->size;
+            if (length) *length = strlen(attribloc->glname);
+            if (bufSize && name) {
+                strncpy(name, attribloc->glname, bufSize - 1);
+                name[bufSize - 1] = '\0';
+            }
+            DBG(SHUT_LOGD("found, type=%s, size=%d, name=%s/%s\n", PrintEnum(attribloc->type), attribloc->size,
+                          attribloc->name, attribloc->glname))
+            noerrorShim();
+            return;
+        });
     }
     DBG(SHUT_LOGD("not found\n"))
     errorShim(GL_INVALID_VALUE);
@@ -427,10 +429,10 @@ GLint APIENTRY_GL4ES gl4es_glGetAttribLocation(GLuint program, const GLchar* nam
     if (glprogram->attribloc) {
         attribloc_t* m;
         kh_foreach_value(
-            glprogram->attribloc, m, if (strcmp(m->glname, name) == 0) {
-                loc = m->index;
-                rloc = m->real_index;
-            })
+                glprogram->attribloc, m, if (strcmp(m->glname, name) == 0) {
+            loc = m->index;
+            rloc = m->real_index;
+        })
     }
     // if found, just return the value, it's done...
     if (loc != -1) {
@@ -464,18 +466,18 @@ void APIENTRY_GL4ES gl4es_glGetActiveUniform(GLuint program, GLuint index, GLsiz
     if (glprogram->uniform) {
         uniform_t* m;
         kh_foreach_value(
-            glprogram->uniform, m, if (m->internal_id == index) {
-                if (type) *type = m->type;
-                if (size) *size = m->size;
-                if (length) *length = strlen(m->name);
-                if (bufSize && name) {
-                    strncpy(name, m->name, bufSize - 1);
-                    name[bufSize - 1] = '\0';
-                }
-                DBG(SHUT_LOGD(" found %s (%zd), type=%s, size=%d\n", m->name, strlen(m->name), PrintEnum(m->type),
-                              m->size))
-                return;
-            });
+                glprogram->uniform, m, if (m->internal_id == index) {
+            if (type) *type = m->type;
+            if (size) *size = m->size;
+            if (length) *length = strlen(m->name);
+            if (bufSize && name) {
+                strncpy(name, m->name, bufSize - 1);
+                name[bufSize - 1] = '\0';
+            }
+            DBG(SHUT_LOGD(" found %s (%zd), type=%s, size=%d\n", m->name, strlen(m->name), PrintEnum(m->type),
+                          m->size))
+            return;
+        });
     }
     // end
     DBG(SHUT_LOGD(" not found\n"))
@@ -525,37 +527,37 @@ void APIENTRY_GL4ES gl4es_glGetProgramiv(GLuint program, GLenum pname, GLint* pa
     LOAD_GLES2(glGetProgramiv);
     noerrorShim();
     switch (pname) {
-    case GL_DELETE_STATUS:
-        if (gles_glGetProgramiv) {
-            gles_glGetProgramiv(glprogram->id, pname, params);
-            errorGL();
-        } else
-            *params = GL_FALSE;
-        break;
-    case GL_LINK_STATUS:
-        *params = glprogram->linked ? GL_TRUE : GL_FALSE;
-        break;
-    case GL_VALIDATE_STATUS:
-        *params = glprogram->valid_result;
-        break;
-    case GL_INFO_LOG_LENGTH:
-        if (gles_glGetProgramiv) {
-            gles_glGetProgramiv(glprogram->id, pname, params);
-            errorGL();
-        } else
-            *params = strlen(getFakeProgramInfo(glprogram));
-        break;
-    case GL_ATTACHED_SHADERS:
-        *params = glprogram->attach_size;
-        break;
-    case GL_ACTIVE_ATTRIBUTES:
-    case GL_ACTIVE_ATTRIBUTE_MAX_LENGTH:
-        if (gles_glGetProgramiv) {
-            gles_glGetProgramiv(glprogram->id, pname, params);
-            errorGL();
-        } else
-            *params = 0;
-        break;
+        case GL_DELETE_STATUS:
+            if (gles_glGetProgramiv) {
+                gles_glGetProgramiv(glprogram->id, pname, params);
+                errorGL();
+            } else
+                *params = GL_FALSE;
+            break;
+        case GL_LINK_STATUS:
+            *params = glprogram->linked ? GL_TRUE : GL_FALSE;
+            break;
+        case GL_VALIDATE_STATUS:
+            *params = glprogram->valid_result;
+            break;
+        case GL_INFO_LOG_LENGTH:
+            if (gles_glGetProgramiv) {
+                gles_glGetProgramiv(glprogram->id, pname, params);
+                errorGL();
+            } else
+                *params = strlen(getFakeProgramInfo(glprogram));
+            break;
+        case GL_ATTACHED_SHADERS:
+            *params = glprogram->attach_size;
+            break;
+        case GL_ACTIVE_ATTRIBUTES:
+        case GL_ACTIVE_ATTRIBUTE_MAX_LENGTH:
+            if (gles_glGetProgramiv) {
+                gles_glGetProgramiv(glprogram->id, pname, params);
+                errorGL();
+            } else
+                *params = 0;
+            break;
 /*
     case GL_ACTIVE_UNIFORMS:
         *params = (glprogram->uniform) ? glprogram->num_uniform : 0;
@@ -566,22 +568,22 @@ void APIENTRY_GL4ES gl4es_glGetProgramiv(GLuint program, GLenum pname, GLint* pa
         kh_foreach_value(glprogram->uniform, m, if (l < strlen(m->name) + 1) l = strlen(m->name) + 1;)* params = l;
     } break;
 */
-    case GL_PROGRAM_BINARY_LENGTH:
-        // TODO: check if extension is present
-        if (gles_glGetProgramiv) {
-            gles_glGetProgramiv(glprogram->id, pname, params);
-            errorGL();
-        } else
-            errorShim(GL_INVALID_ENUM);
-        break;
+        case GL_PROGRAM_BINARY_LENGTH:
+            // TODO: check if extension is present
+            if (gles_glGetProgramiv) {
+                gles_glGetProgramiv(glprogram->id, pname, params);
+                errorGL();
+            } else
+                errorShim(GL_INVALID_ENUM);
+            break;
 
-    default:
-        if (gles_glGetProgramiv) {
-            gles_glGetProgramiv(glprogram->id, pname, params);
-            errorGL();
-        } else
-            errorShim(GL_INVALID_ENUM);
-        break;
+        default:
+            if (gles_glGetProgramiv) {
+                gles_glGetProgramiv(glprogram->id, pname, params);
+                errorGL();
+            } else
+                errorShim(GL_INVALID_ENUM);
+            break;
     }
 }
 
@@ -611,14 +613,14 @@ GLint APIENTRY_GL4ES gl4es_glGetUniformLocation(GLuint program, const GLchar* na
     if (glprogram->uniform) {
         uniform_t* m;
         kh_foreach_value(
-            glprogram->uniform, m, if (strlen(m->name) == l && strncmp(m->name, name, l) == 0) {
-                res = m->id;
-                if (index > m->size) {
-                    res = -1; // too big !
-                } else
-                    res += index;
-                break;
-            })
+                glprogram->uniform, m, if (strlen(m->name) == l && strncmp(m->name, name, l) == 0) {
+            res = m->id;
+            if (index > m->size) {
+                res = -1; // too big !
+            } else
+                res += index;
+            break;
+        })
     }
     DBG(SHUT_LOGD(" location: %d\n", res))
     return res;
@@ -647,7 +649,7 @@ static void clear_program(program_t* glprogram) {
         int ret;
         // attribloc->glname must not be freed
         kh_foreach(glprogram->attribloc, k, m, free(m->name); free(m); kh_del(attribloclist, glprogram->attribloc, k);)
-            kh_destroy(attribloclist, glprogram->attribloc);
+        kh_destroy(attribloclist, glprogram->attribloc);
         khash_t(attribloclist)* attribloc = glprogram->attribloc = kh_init(attribloclist);
         kh_put(attribloclist, attribloc, 1, &ret);
         kh_del(attribloclist, attribloc, 1);
@@ -799,12 +801,88 @@ int gl4es_useProgramBinary(GLuint program, int length, GLenum format, const void
 
     clear_program(glprogram);
 
+    if (!glprogram->last_comp) {
+        // check if attached shaders are compatible in term of varying...
+        shaderconv_need_t needs = {0};
+        needs.need_texcoord = -1;
+        // first get the compatible need
+        for (int i = 0; i < glprogram->attach_size; i++) {
+            accumShaderNeeds(glprogram->attach[i], &needs);
+        }
+        // create one vertex shader if needed!
+        if (!glprogram->last_vert) {
+            glprogram->default_need = (shaderconv_need_t*)malloc(sizeof(shaderconv_need_t));
+            memcpy(glprogram->default_need, &needs, sizeof(shaderconv_need_t));
+            glprogram->default_vertex = 1;
+            GLenum vtx = gl4es_glCreateShader(GL_VERTEX_SHADER);
+            gl4es_glShaderSource(vtx, 1, fpe_VertexShader(&needs, NULL), NULL);
+            gl4es_glCompileShader(vtx);
+            gl4es_glAttachShader(glprogram->id, vtx);
+        }
+        // create one fragment shader if needed!
+        if (!glprogram->last_frag) {
+            glprogram->default_need = (shaderconv_need_t*)malloc(sizeof(shaderconv_need_t));
+            memcpy(glprogram->default_need, &needs, sizeof(shaderconv_need_t));
+            glprogram->default_fragment = 1;
+            GLenum vtx = gl4es_glCreateShader(GL_FRAGMENT_SHADER);
+            gl4es_glShaderSource(vtx, 1, fpe_FragmentShader(&needs, NULL), NULL);
+            gl4es_glCompileShader(vtx);
+            gl4es_glAttachShader(glprogram->id, vtx);
+        }
+        int compatible = 1;
+        // now is everyone ok?
+        for (int i = 0; i < glprogram->attach_size && compatible; i++) {
+            compatible = isShaderCompatible(glprogram->attach[i], &needs);
+        }
+        // someone is not compatible, redoing shaders...
+        if (!compatible) {
+            DBG(SHUT_LOGD("Need to redo some shaders...\n"))
+            for (int i = 0; i < glprogram->attach_size; i++) {
+                redoShader(glprogram->attach[i], &needs);
+            }
+        }
+        // check if Built-in VA are used, and if so, bind them to their proper location
+
+        if (glprogram->last_vert && !glprogram->last_vert->is_converted_essl_320) {
+            for (int i = 0; i < ATT_MAX; ++i) {
+                const char* attribute = hasBuiltinAttrib(glprogram->last_vert->converted, i);
+                if (attribute) gl4es_glBindAttribLocation(glprogram->id, i, attribute);
+            }
+        }
+        // for glBindFragDataLocation
+        if (glprogram->last_vert && glprogram->frag_data_changed == 1) {
+            LOAD_GLES2(glShaderSource);
+            LOAD_GLES2(glCompileShader);
+            LOAD_GLES2(glAttachShader);
+            if (gles_glShaderSource && gles_glCompileShader && gles_glAttachShader) {
+                gles_glShaderSource(glprogram->last_frag->id, 1, (const GLchar* const*)&glprogram->last_frag->converted,
+                                    NULL);
+                gles_glCompileShader(glprogram->last_frag->id);
+                LOAD_GLES2(glGetShaderiv);
+                GLint status = 0;
+                gles_glGetShaderiv(glprogram->last_frag->id, GL_COMPILE_STATUS, &status);
+                if (status != GL_TRUE) {
+                    DBG(char tmp[500]; GLint length; LOAD_GLES2(glGetShaderInfoLog);
+                                gles_glGetShaderInfoLog(glprogram->last_frag->id, 500, &length, tmp);
+                                DBG(SHUT_LOGD("Failed to compile patched shader, using default shader, log:\n%s\n", tmp);))
+                    gles_glShaderSource(glprogram->last_frag->id, 1,
+                                        (const GLchar* const*)&glprogram->last_frag->before_patch, NULL);
+                    gles_glCompileShader(glprogram->last_frag->id);
+                }
+                gles_glAttachShader(glprogram->id, glprogram->last_frag->id);
+            } else {
+                noerrorShim();
+            }
+        }
+    }
+
     LOAD_GLES_OES(glProgramBinary);
     LOAD_GLES2(glGetProgramiv);
 
     gles_glProgramBinary(glprogram->id, format, binary, length);
 
     gles_glGetProgramiv(glprogram->id, GL_LINK_STATUS, &glprogram->linked);
+    SHUT_LOGD("ZOMDROID_DBG: glLinkProgram id=%d linked=%d\n", glprogram->id, glprogram->linked);
     DBG(SHUT_LOGD(" link status = %d\n", glprogram->linked))
     if (glprogram->linked) {
         fill_program(glprogram);
@@ -869,101 +947,154 @@ void APIENTRY_GL4ES gl4es_glLinkProgram(GLuint program) {
 
     clear_program(glprogram);
 
-    // check if attached shaders are compatible in term of varying...
-    shaderconv_need_t needs = {0};
-    needs.need_texcoord = -1;
-    // first get the compatible need
-    for (int i = 0; i < glprogram->attach_size; i++) {
-        accumShaderNeeds(glprogram->attach[i], &needs);
-    }
-    // create one vertex shader if needed!
-    if (!glprogram->last_vert) {
-        glprogram->default_need = (shaderconv_need_t*)malloc(sizeof(shaderconv_need_t));
-        memcpy(glprogram->default_need, &needs, sizeof(shaderconv_need_t));
-        glprogram->default_vertex = 1;
-        GLenum vtx = gl4es_glCreateShader(GL_VERTEX_SHADER);
-        gl4es_glShaderSource(vtx, 1, fpe_VertexShader(&needs, NULL), NULL);
-        gl4es_glCompileShader(vtx);
-        gl4es_glAttachShader(glprogram->id, vtx);
-    }
-    // create one fragment shader if needed!
-    if (!glprogram->last_frag) {
-        glprogram->default_need = (shaderconv_need_t*)malloc(sizeof(shaderconv_need_t));
-        memcpy(glprogram->default_need, &needs, sizeof(shaderconv_need_t));
-        glprogram->default_fragment = 1;
-        GLenum vtx = gl4es_glCreateShader(GL_FRAGMENT_SHADER);
-        gl4es_glShaderSource(vtx, 1, fpe_FragmentShader(&needs, NULL), NULL);
-        gl4es_glCompileShader(vtx);
-        gl4es_glAttachShader(glprogram->id, vtx);
-    }
-    int compatible = 1;
-    // now is everyone ok?
-    for (int i = 0; i < glprogram->attach_size && compatible; i++) {
-        compatible = isShaderCompatible(glprogram->attach[i], &needs);
-    }
-    // someone is not compatible, redoing shaders...
-    if (!compatible) {
-        DBG(SHUT_LOGD("Need to redo some shaders...\n"))
+    // Skip shader compatibility checks for compute shaders - they don't need vertex/fragment linking
+    if (!glprogram->last_comp) {
+        // check if attached shaders are compatible in term of varying...
+        shaderconv_need_t needs = {0};
+        needs.need_texcoord = -1;
+        // first get the compatible need
         for (int i = 0; i < glprogram->attach_size; i++) {
-            redoShader(glprogram->attach[i], &needs);
+            accumShaderNeeds(glprogram->attach[i], &needs);
         }
-    }
-    // check if Built-in VA are used, and if so, bind them to their proper location
-
-    if (glprogram->last_vert && !glprogram->last_vert->is_converted_essl_320) {
-        for (int i = 0; i < ATT_MAX; ++i) {
-            const char* attribute = hasBuiltinAttrib(glprogram->last_vert->converted, i);
-            if (attribute) gl4es_glBindAttribLocation(glprogram->id, i, attribute);
+        if(glprogram->last_vert) SHUT_LOGD("ZOMDROID_DBG: after accum vert->converted=%p\n", glprogram->last_vert->converted);
+        if(glprogram->last_frag) SHUT_LOGD("ZOMDROID_DBG: after accum frag->converted=%p\n", glprogram->last_frag->converted);
+        // create one vertex shader if needed!
+        if (!glprogram->last_vert) {
+            glprogram->default_need = (shaderconv_need_t*)malloc(sizeof(shaderconv_need_t));
+            memcpy(glprogram->default_need, &needs, sizeof(shaderconv_need_t));
+            glprogram->default_vertex = 1;
+            GLenum vtx = gl4es_glCreateShader(GL_VERTEX_SHADER);
+            gl4es_glShaderSource(vtx, 1, fpe_VertexShader(&needs, NULL), NULL);
+            gl4es_glCompileShader(vtx);
+            gl4es_glAttachShader(glprogram->id, vtx);
         }
-    }
-    // for glBindFragDataLocation
-    if (glprogram->last_vert && glprogram->frag_data_changed == 1) {
-        LOAD_GLES2(glShaderSource);
-        LOAD_GLES2(glCompileShader);
-        LOAD_GLES2(glAttachShader);
-        if (gles_glShaderSource && gles_glCompileShader && gles_glAttachShader) {
-            gles_glShaderSource(glprogram->last_frag->id, 1, (const GLchar* const*)&glprogram->last_frag->converted,
-                                NULL);
-            gles_glCompileShader(glprogram->last_frag->id);
-            LOAD_GLES2(glGetShaderiv);
-            GLint status = 0;
-            gles_glGetShaderiv(glprogram->last_frag->id, GL_COMPILE_STATUS, &status);
-            if (status != GL_TRUE) {
-                DBG(char tmp[500]; GLint length; LOAD_GLES2(glGetShaderInfoLog);
-                    gles_glGetShaderInfoLog(glprogram->last_frag->id, 500, &length, tmp);
-                    SHUT_LOGD("Failed to compile patched shader, using default shader, log:\n%s\n", tmp);)
-                gles_glShaderSource(glprogram->last_frag->id, 1,
-                                    (const GLchar* const*)&glprogram->last_frag->before_patch, NULL);
-                gles_glCompileShader(glprogram->last_frag->id);
+        // create one fragment shader if needed!
+        if (!glprogram->last_frag) {
+            glprogram->default_need = (shaderconv_need_t*)malloc(sizeof(shaderconv_need_t));
+            memcpy(glprogram->default_need, &needs, sizeof(shaderconv_need_t));
+            glprogram->default_fragment = 1;
+            GLenum vtx = gl4es_glCreateShader(GL_FRAGMENT_SHADER);
+            gl4es_glShaderSource(vtx, 1, fpe_FragmentShader(&needs, NULL), NULL);
+            gl4es_glCompileShader(vtx);
+            gl4es_glAttachShader(glprogram->id, vtx);
+        }
+        int compatible = 1;
+        // now is everyone ok?
+        for (int i = 0; i < glprogram->attach_size && compatible; i++) {
+            compatible = isShaderCompatible(glprogram->attach[i], &needs);
+        }
+        // someone is not compatible, redoing shaders...
+        if (!compatible) {
+            DBG(SHUT_LOGD("Need to redo some shaders...\n"))
+            for (int i = 0; i < glprogram->attach_size; i++) {
+                redoShader(glprogram->attach[i], &needs);
             }
-            gles_glAttachShader(glprogram->id, glprogram->last_frag->id);
-        } else {
-            noerrorShim();
         }
-    }
+        SHUT_LOGD("ZOMDROID_DBG: step A vert=%p\n", glprogram->last_vert ? glprogram->last_vert->converted : NULL);
+        // check if Built-in VA are used, and if so, bind them to their proper location
+        if (glprogram->last_vert && !glprogram->last_vert->is_converted_essl_320) {
+            for (int i = 0; i < ATT_MAX; ++i) {
+                const char* attribute = hasBuiltinAttrib(glprogram->last_vert->converted, i);
+                if (attribute) gl4es_glBindAttribLocation(glprogram->id, i, attribute);
+            }
+        }
+        SHUT_LOGD("ZOMDROID_DBG: step B vert=%p\n", glprogram->last_vert ? glprogram->last_vert->converted : NULL);
+        SHUT_LOGD("ZOMDROID_DBG: frag_data_changed=%d\n", glprogram->frag_data_changed);
+        // for glBindFragDataLocation
+        if (glprogram->last_vert && glprogram->frag_data_changed == 1) {
+            LOAD_GLES2(glShaderSource);
+            LOAD_GLES2(glCompileShader);
+            LOAD_GLES2(glAttachShader);
+            if (gles_glShaderSource && gles_glCompileShader && gles_glAttachShader) {
+                gles_glShaderSource(glprogram->last_frag->id, 1, (const GLchar* const*)&glprogram->last_frag->converted,
+                                    NULL);
+                gles_glCompileShader(glprogram->last_frag->id);
+                LOAD_GLES2(glGetShaderiv);
+                GLint status = 0;
+                gles_glGetShaderiv(glprogram->last_frag->id, GL_COMPILE_STATUS, &status);
+                if (status != GL_TRUE) {
+                    DBG(char tmp[500]; GLint length; LOAD_GLES2(glGetShaderInfoLog);
+                                gles_glGetShaderInfoLog(glprogram->last_frag->id, 500, &length, tmp);
+                                DBG(SHUT_LOGD("Failed to compile patched shader, using default shader, log:\n%s\n", tmp);))
+                    gles_glShaderSource(glprogram->last_frag->id, 1,
+                                        (const GLchar* const*)&glprogram->last_frag->before_patch, NULL);
+                    gles_glCompileShader(glprogram->last_frag->id);
+                }
+                gles_glAttachShader(glprogram->id, glprogram->last_frag->id);
+            } else {
+                noerrorShim();
+            }
+        }
+    } // end of !last_comp block
+
+    SHUT_LOGD("ZOMDROID_DBG: step C vert=%p len=%zu\n",
+              glprogram->last_vert ? glprogram->last_vert->converted : NULL,
+              glprogram->last_vert && glprogram->last_vert->converted ? strlen(glprogram->last_vert->converted) : 0);
     // ok, continue with linking
     LOAD_GLES2(glLinkProgram);
     if (gles_glLinkProgram) {
         LOAD_GLES(glGetError);
         LOAD_GLES2(glGetProgramiv);
+        SHUT_LOGD("ZOMDROID_DBG: attach_size=%d\n", glprogram->attach_size);
+        for(int i=0; i<glprogram->attach_size; i++)
+        SHUT_LOGD("ZOMDROID_DBG: attach[%d]=%d\n", i, glprogram->attach[i]);
+        if(glprogram->last_vert) SHUT_LOGD("ZOMDROID_DBG: last_vert id=%d\n", glprogram->last_vert->id);
+        if(glprogram->last_frag) SHUT_LOGD("ZOMDROID_DBG: last_frag id=%d\n", glprogram->last_frag->id);
+        if (glprogram->last_vert && glprogram->last_vert->converted) {
+            const char* cv = glprogram->last_vert->converted;
+            SHUT_LOGD("ZOMDROID_DBG: VERT len=%zu first50=%.50s\n", strlen(cv), cv);
+        }
+        if (glprogram->last_frag && glprogram->last_frag->converted) {
+            const char* cv = glprogram->last_frag->converted;
+            SHUT_LOGD("ZOMDROID_DBG: FRAG len=%zu first50=%.50s\n", strlen(cv), cv);
+        }
+        if (glprogram->last_vert && glprogram->last_vert->converted) {
+            char tmp[512];
+            strncpy(tmp, glprogram->last_vert->converted, 511);
+            tmp[511] = '\0';
+            for(int i=0; tmp[i]; i++) if(tmp[i]=='\n') tmp[i]=' ';
+            SHUT_LOGD("ZOMDROID_DBG: VERT: %s\n", tmp);
+        }
+        if (glprogram->last_frag && glprogram->last_frag->converted) {
+            char tmp[512];
+            strncpy(tmp, glprogram->last_frag->converted, 511);
+            tmp[511] = '\0';
+            for(int i=0; tmp[i]; i++) if(tmp[i]=='\n') tmp[i]=' ';
+            SHUT_LOGD("ZOMDROID_DBG: FRAG: %s\n", tmp);
+        }
+        GLint attached = 0;
+        gles_glGetProgramiv(glprogram->id, GL_ATTACHED_SHADERS, &attached);
+        SHUT_LOGD("ZOMDROID_DBG: GPU attached shaders=%d\n", attached);
         gles_glLinkProgram(glprogram->id);
         GLenum err = gles_glGetError();
         // Get Link Status
         gles_glGetProgramiv(glprogram->id, GL_LINK_STATUS, &glprogram->linked);
-        DBG(SHUT_LOGD(" link status = %d\n", glprogram->linked))
+        SHUT_LOGD("ZOMDROID_DBG: glLinkProgram id=%d linked=%d\n", glprogram->id, glprogram->linked);
         if (glprogram->linked) {
             set_uniforms_default_value(program, glprogram->declarations, MAX_UNIFORM_VARIABLE_NUMBER);
             fill_program(glprogram);
             noerrorShimNoPurge();
         } else {
-            GLsizei log_length;
+            GLsizei log_length = 0;
             gles_glGetProgramiv(glprogram->id, GL_INFO_LOG_LENGTH, &log_length);
-            DBG(SHUT_LOGD("Linker error length: %i\n", log_length));
-            if (log_length != 0) {
-                LOAD_GLES2(glGetProgramInfoLog);
-                GLchar log_chars[log_length];
-                gles_glGetProgramInfoLog(glprogram->id, log_length, &log_length, log_chars);
-                SHUT_LOGD("%s", log_chars);
+            SHUT_LOGD("ZOMDROID_DBG: Link FAILED id=%d log_length=%d\n", glprogram->id, log_length);
+            {
+                GLint log_len = 0;
+                gles_glGetProgramiv(glprogram->id, GL_INFO_LOG_LENGTH, &log_len);
+                SHUT_LOGD("ZOMDROID_DBG: driver log_len=%d", log_len);
+                if (log_len > 1) {
+                    char* buf = (char*)malloc(log_len);
+                    gl4es_glGetProgramInfoLog(glprogram->id, log_len, NULL, buf);
+                    SHUT_LOGD("ZOMDROID_DBG: driver link error: %s", buf);
+                    free(buf);
+                }
+            }
+            if (log_length > 0) {
+                char* log_chars = (char*)malloc(log_length + 1);
+                gl4es_glGetProgramInfoLog(glprogram->id, log_length, &log_length, log_chars);
+                log_chars[log_length] = '\0';
+                SHUT_LOGD("ZOMDROID_DBG: Link error: %s\n", log_chars);
+                free(log_chars);
             }
             // should DBG the linker error?
             DBG(SHUT_LOGD(" Link failled!\n"))
@@ -1145,7 +1276,7 @@ AliasExport(GLvoid, glBindAttribLocation, ARB, (GLhandleARB programObj, GLuint i
 
 AliasExport(GLvoid, glGetActiveAttrib, ARB,
             (GLhandleARB programObj, GLuint index, GLsizei maxLength, GLsizei* length, GLint* size, GLenum* type,
-             GLcharARB* name));
+                    GLcharARB* name));
 
 AliasExport(GLint, glGetAttribLocation, ARB, (GLhandleARB programObj, const GLcharARB* name));
 
@@ -1165,4 +1296,4 @@ AliasExport(GLvoid, glGetAttachedObjects, ARB,
 AliasExport(GLint, glGetUniformLocation, ARB, (GLhandleARB programObj, const GLcharARB* name));
 AliasExport(GLvoid, glGetActiveUniform, ARB,
             (GLhandleARB programObj, GLuint index, GLsizei maxLength, GLsizei* length, GLint* size, GLenum* type,
-             GLcharARB* name));
+                    GLcharARB* name));

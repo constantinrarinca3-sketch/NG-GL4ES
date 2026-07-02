@@ -581,18 +581,24 @@ void GoUniformMatrix2fv(program_t* glprogram, GLint location, GLsizei count, GLb
         return;
     }
     // transpose if needed
+    // ZOMDROID FIX: size the transpose buffer to count matrices (tmp[4] overflowed for count>1).
     GLfloat* v = (GLfloat*)value;
-    GLfloat tmp[4];
+    GLfloat stackbuf[4];
+    GLfloat* heapbuf = NULL;
     if (transpose) {
-        v = tmp;
-        for (int n = 0; n < count; n++)
-            for (int i = 0; i < 2; i++)
-                for (int j = 0; j < 2; j++)
-                    v[n * 2 * 2 + i * 2 + j] = value[n * 2 * 2 + i + j * 2];
+        if (count <= 1) v = stackbuf;
+        else { heapbuf = (GLfloat*)malloc(sizeof(GLfloat) * 4 * count); v = heapbuf; }
+        if (v) {
+            for (int n = 0; n < count; n++)
+                for (int i = 0; i < 2; i++)
+                    for (int j = 0; j < 2; j++)
+                        v[n * 2 * 2 + i * 2 + j] = value[n * 2 * 2 + i + j * 2];
+        } else v = (GLfloat*)value;
     }
     // ok, check the value in the cache
     int rsize = sizeof(GLfloat) * 2 * 2 * count;
     if (memcmp((char*)glprogram->cache.cache + m->cache_offs, v, rsize) == 0) {
+        if (heapbuf) free(heapbuf);
         noerrorShim();
         return; // nothing to do, same value already there
     }
@@ -604,6 +610,7 @@ void GoUniformMatrix2fv(program_t* glprogram, GLint location, GLsizei count, GLb
         errorGL();
     } else
         errorShim(GL_INVALID_OPERATION); // no GLSL hardware
+    if (heapbuf) free(heapbuf);
 }
 
 void APIENTRY_GL4ES gl4es_glUniformMatrix3fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat* value) {
@@ -649,18 +656,24 @@ void GoUniformMatrix3fv(program_t* glprogram, GLint location, GLsizei count, GLb
         return;
     }
     // transpose if needed
+    // ZOMDROID FIX: size the transpose buffer to count matrices (tmp[9] overflowed for count>1).
     GLfloat* v = (GLfloat*)value;
-    GLfloat tmp[9];
+    GLfloat stackbuf[9];
+    GLfloat* heapbuf = NULL;
     if (transpose) {
-        v = tmp;
-        for (int n = 0; n < count; n++)
-            for (int i = 0; i < 3; i++)
-                for (int j = 0; j < 3; j++)
-                    v[n * 3 * 3 + i * 3 + j] = value[n * 3 * 3 + i + j * 3];
+        if (count <= 1) v = stackbuf;
+        else { heapbuf = (GLfloat*)malloc(sizeof(GLfloat) * 9 * count); v = heapbuf; }
+        if (v) {
+            for (int n = 0; n < count; n++)
+                for (int i = 0; i < 3; i++)
+                    for (int j = 0; j < 3; j++)
+                        v[n * 3 * 3 + i * 3 + j] = value[n * 3 * 3 + i + j * 3];
+        } else v = (GLfloat*)value;
     }
     // ok, check the value in the cache
     int rsize = sizeof(GLfloat) * 3 * 3 * count;
     if (memcmp((char*)glprogram->cache.cache + m->cache_offs, v, rsize) == 0) {
+        if (heapbuf) free(heapbuf);
         noerrorShim();
         return; // nothing to do, same value already there
     }
@@ -672,6 +685,7 @@ void GoUniformMatrix3fv(program_t* glprogram, GLint location, GLsizei count, GLb
         errorGL();
     } else
         errorShim(GL_INVALID_OPERATION); // no GLSL hardware
+    if (heapbuf) free(heapbuf);
 }
 void APIENTRY_GL4ES gl4es_glUniformMatrix4fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat* value) {
     DBG(SHUT_LOGD("glUniformMatrix4fv(%d, %d, %d, %p) p=>(%f, %f, %f, %f, %f...)\n", location, count, transpose, value,
@@ -717,16 +731,23 @@ void GoUniformMatrix4fv(program_t* glprogram, GLint location, GLsizei count, GLb
         return;
     }
     // transpose if needed
+    // ZOMDROID FIX: size the transpose buffer to count matrices (tmp[16] overflowed for
+    // count>1 — PZ's Shader.setMatrixPalette sends the whole bone-matrix array).
     GLfloat* v = (GLfloat*)value;
-    GLfloat tmp[16];
+    GLfloat stackbuf[16];
+    GLfloat* heapbuf = NULL;
     if (transpose) {
-        v = tmp;
-        for (int n = 0; n < count; n++)
-            matrix_transpose(value + n * 4 * 4, v + n * 4 * 4);
+        if (count <= 1) v = stackbuf;
+        else { heapbuf = (GLfloat*)malloc(sizeof(GLfloat) * 16 * count); v = heapbuf; }
+        if (v) {
+            for (int n = 0; n < count; n++)
+                matrix_transpose(value + n * 4 * 4, v + n * 4 * 4);
+        } else v = (GLfloat*)value;
     }
     // ok, check the value in the cache
     int rsize = sizeof(GLfloat) * 4 * 4 * count;
     if (memcmp((char*)glprogram->cache.cache + m->cache_offs, v, rsize) == 0) {
+        if (heapbuf) free(heapbuf);
         noerrorShim();
         return; // nothing to do, same value already there
     }
@@ -740,6 +761,7 @@ void GoUniformMatrix4fv(program_t* glprogram, GLint location, GLsizei count, GLb
         // printf("No GLES2 function\n");
         errorShim(GL_INVALID_OPERATION); // no GLSL hardware
     }
+    if (heapbuf) free(heapbuf);
 }
 
 int GetUniformi(program_t* glprogram, GLint location) {

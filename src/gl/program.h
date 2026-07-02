@@ -219,6 +219,7 @@ typedef struct {
     GLuint          *attach;
     struct shader_s        *last_vert;
     struct shader_s        *last_frag;
+    struct shader_s        *last_comp;
     int             default_vertex;
     int             default_fragment;
     shaderconv_need_t *default_need;    // filled only if default_vertex or default_fragment is used
