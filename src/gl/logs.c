@@ -49,3 +49,38 @@ void LogPrintf(const char *fmt,...)
 	va_end(args);
 }
 //----------------------------------------------------------------------------
+
+// ZOMDROID GL TRACE: log native rejections in the uniform/program path to a flushed file.
+#include <stdio.h>
+void zomdroid_gltrace(const char* fmt, ...) {
+    static FILE* f = NULL;
+    static int init = 0;
+    static int count = 0;
+    if (count > 12000) return;
+    if (!init) { init = 1; f = fopen("/data/data/com.zomdroid/files/gl_trace.txt", "w"); }
+    if (!f) return;
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(f, fmt, args);
+    va_end(args);
+    fputc('\n', f);
+    fflush(f);
+    count++;
+}
+
+// ZOMDROID: registry of texture glnames ever attached to an FBO color attachment.
+// Lets draw-site probes recognize "this draw samples an FBO texture" (composite passes).
+static unsigned zomdroid_fbotex[512];
+static int zomdroid_fbotex_n = 0;
+void zomdroid_mark_fbo_tex(unsigned glname) {
+    if (!glname) return;
+    for (int i = 0; i < zomdroid_fbotex_n; i++)
+        if (zomdroid_fbotex[i] == glname) return;
+    if (zomdroid_fbotex_n < 512) zomdroid_fbotex[zomdroid_fbotex_n++] = glname;
+}
+int zomdroid_is_fbo_tex(unsigned glname) {
+    if (!glname) return 0;
+    for (int i = 0; i < zomdroid_fbotex_n; i++)
+        if (zomdroid_fbotex[i] == glname) return 1;
+    return 0;
+}

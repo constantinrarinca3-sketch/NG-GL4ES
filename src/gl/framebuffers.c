@@ -329,6 +329,13 @@ void SetAttachment(glframebuffer_t* fb, GLenum attachment, GLenum atttarget, GLu
         fb->color[attachment - GL_COLOR_ATTACHMENT0] = att;
         fb->l_color[attachment - GL_COLOR_ATTACHMENT0] = level;
         fb->t_color[attachment - GL_COLOR_ATTACHMENT0] = atttarget;
+        // ZOMDROID TEST: register the native glname of every FBO color attachment so
+        // draw-site probes can recognize composite passes that sample FBO textures.
+        if (att && atttarget != GL_RENDERBUFFER) {
+            extern void zomdroid_mark_fbo_tex(unsigned);
+            gltexture_t* zt = gl4es_getTexture(atttarget, att);
+            if (zt) zomdroid_mark_fbo_tex(zt->glname);
+        }
         break;
     case GL_DEPTH_ATTACHMENT:
         fb->depth = att;
@@ -1443,7 +1450,29 @@ void APIENTRY_GL4ES gl4es_glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX
                   srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, PrintEnum(filter), glstate->fbo.fbo_read->id,
                   glstate->fbo.fbo_draw->id);)
     LOAD_GLES3(glBlitFramebuffer);
-    gles_glBlitFramebuffer(srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter);
+    // ZOMDROID TEST: blit is a chunk-cache-update suspect (frozen world) and a candidate
+    // source of the untraced GL_INVALID_OPERATION. Log rects, tracked vs NATIVE bindings,
+    // and the native error of THIS call.
+    {
+        extern void zomdroid_gltrace(const char* fmt, ...);
+        static int zbl_budget = 400;
+        LOAD_GLES(glGetIntegerv);
+        LOAD_GLES(glGetError);
+        GLint znr = -1, znd = -1;
+        gles_glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &znr);
+        gles_glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &znd);
+        gles_glGetError(); // clear pending
+        gles_glBlitFramebuffer(srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter);
+        GLenum zbe = gles_glGetError();
+        if (zbl_budget > 0 || zbe != GL_NO_ERROR) {
+            if (zbl_budget > 0) zbl_budget--;
+            zomdroid_gltrace("BLIT %d,%d-%d,%d -> %d,%d-%d,%d mask=0x%X tracked r=%d d=%d NATIVE r=%d d=%d err=0x%X",
+                             srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask,
+                             glstate->fbo.fbo_read ? (int)glstate->fbo.fbo_read->id : -1,
+                             glstate->fbo.fbo_draw ? (int)glstate->fbo.fbo_draw->id : -1, znr, znd, zbe);
+        }
+        errorShim(zbe);
+    }
     return;
     // // mask will be ignored
     // // filter will be taken only for ReadFBO has no Texture attached (so readpixel is used)
