@@ -238,9 +238,9 @@ int is_mipmap_needed(glsampler_t* sampler) {
 
 GLenum get_texture_min_filter(gltexture_t* texture, glsampler_t* sampler) {
     GLenum ret = sampler->min_filter;
-    // ZOMDROID FIX (restored after ladder-A exonerated it): a mipmap min_filter on a texture
-    // with no generated mip chain is INCOMPLETE in GLES -> samples white/black
-    // (PZ B42 floor/wall/menu textures). Force a non-mipmap filter when the texture has no mips.
+    // ZOMDROID FIX: a mipmap min_filter on a texture with no generated mip chain is
+    // INCOMPLETE in GLES -> samples white (PZ B42 floor/wall/menu textures). Force a
+    // non-mipmap filter when the texture has no mips.
     int zomdroid_no_mips = (!texture->mipmap_done && !texture->mipmap_auto);
     if (zomdroid_no_mips || (globals4es.automipmap == 3) || ((globals4es.automipmap == 1) && (texture->mipmap_auto == 0)) ||
         (texture->compressed && (texture->mipmap_auto == 0))) {

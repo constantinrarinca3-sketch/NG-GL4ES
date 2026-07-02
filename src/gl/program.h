@@ -329,23 +329,13 @@ int gl4es_getProgramBinary(GLuint program, int *length, GLenum *format, void** b
         return (type)0; \
     }
 
-/* ZOMDROID TEST: instrumented to catch native glUseProgram rejections (suspected source
-   of the per-frame 1281 at PZ DefaultShader.setTextureActive -> useTexture never set ->
-   untextured white geometry). Polls native glGetError around the switch. */
 #define APPLY_PROGRAM(prg, glprg) \
     if(glstate->gleshard->program != prg) {  \
-        extern void zomdroid_gltrace(const char* fmt, ...); \
-        LOAD_GLES(glGetError);              \
-        GLenum zft_pre = gles_glGetError(); \
         glstate->gleshard->program = prg;    \
         glstate->gleshard->glprogram = glprg;\
         LOAD_GLES2(glUseProgram);           \
         if(gles_glUseProgram)               \
             gles_glUseProgram(prg);         \
-        { GLenum zft_e = gles_glGetError(); \
-          (void)zft_pre; \
-          if (zft_e != GL_NO_ERROR) \
-            zomdroid_gltrace("APPLY_PROGRAM prg=%u use_err=0x%X", (unsigned)prg, zft_e); } \
     }
 
 void GoUniformfv(program_t *glprogram, GLint location, int size, int count, const GLfloat *value);

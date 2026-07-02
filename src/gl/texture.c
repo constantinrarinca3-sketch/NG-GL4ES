@@ -718,9 +718,8 @@ GLenum swizzle_internalformat(GLenum* internalformat, GLenum format, GLenum type
         }
         break;
     case GL_COMPRESSED_RGB:
-        // ZOMDROID FIX (restored after ladder-A exonerated it): ret was not set, so
-        // *internalformat stayed GL_COMPRESSED_RGB, which GLES rejects in glTexImage2D
-        // (GL_INVALID_VALUE). Map to GL_RGB.
+        // ZOMDROID FIX: ret was not set, so *internalformat stayed GL_COMPRESSED_RGB,
+        // which GLES rejects in glTexImage2D (GL_INVALID_VALUE). Map to GL_RGB.
         ret = GL_RGB;
         sret = GL_RGB;
         break;
