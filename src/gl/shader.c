@@ -23,6 +23,94 @@
 KHASH_MAP_IMPL_INT(shaderlist, shader_t*);
 
 // ============================================================
+// ZOMDROID FIX (invisible character root): PZ shaders redefine GLSL builtins
+// (max/min/clamp) for ancient GLSL 1.20 compatibility. GLES3 forbids redefining
+// builtins — Adreno fails at LINK ("'max' : can't redefine/overload built-in
+// functions!") → model programs never link → character/zombies invisible.
+// ES3 has all needed overloads natively, so strip PZ's prototypes AND definitions.
+// Removed regions are blanked with spaces (newlines kept → stable line numbers).
+static int zomdroid_is_type_word(const char* w, int len) {
+    static const char* t[] = {"float", "int",   "uint",  "vec2",  "vec3",  "vec4", "ivec2",
+                              "ivec3", "ivec4", "uvec2", "uvec3", "uvec4", "bool"};
+    for (unsigned zi = 0; zi < sizeof(t) / sizeof(t[0]); zi++)
+        if ((int)strlen(t[zi]) == len && !strncmp(w, t[zi], len)) return 1;
+    return 0;
+}
+static void zomdroid_strip_builtin_redefs(char* src) {
+    // STRIP strategy (v3): remove PZ's prototypes AND definitions of builtin
+    // max/min/clamp. Their mixed-type call sites (the reason PZ wrote the overloads)
+    // are legalized by injecting GL_EXT_shader_implicit_conversions into the converted
+    // shader (see the SIMPLE path). Rename-per-shader (v2) failed: PZ links several
+    // compilation units per stage, definitions live in a shared unit while calls sit
+    // in others — per-shader renaming broke the cross-unit resolution
+    // ("INTERNAL ERROR: Call to undefined function").
+    static const char* names[] = {"max", "min", "clamp"};
+    if (!src) return;
+    for (unsigned bi = 0; bi < sizeof(names) / sizeof(names[0]); bi++) {
+        const char* name = names[bi];
+        size_t nlen = strlen(name);
+        char* p = src;
+        while ((p = strstr(p, name)) != NULL) {
+            if ((p > src && (isalnum((unsigned char)p[-1]) || p[-1] == '_')) || isalnum((unsigned char)p[nlen]) ||
+                p[nlen] == '_') {
+                p += nlen;
+                continue;
+            }
+            char* q = p + nlen;
+            while (*q == ' ' || *q == '\t') q++;
+            if (*q != '(') {
+                p += nlen;
+                continue;
+            }
+            char* w = p;
+            while (w > src && (w[-1] == ' ' || w[-1] == '\t')) w--;
+            char* ws = w;
+            while (ws > src && (isalnum((unsigned char)ws[-1]) || ws[-1] == '_')) ws--;
+            if (ws == w || !zomdroid_is_type_word(ws, (int)(w - ws))) {
+                p += nlen;
+                continue;
+            }
+            int depth = 0;
+            char* e = q;
+            while (*e) {
+                if (*e == '(') depth++;
+                else if (*e == ')') {
+                    depth--;
+                    if (!depth) break;
+                }
+                e++;
+            }
+            if (*e != ')') break;
+            e++;
+            while (*e == ' ' || *e == '\t' || *e == '\n' || *e == '\r') e++;
+            char* zend = NULL;
+            if (*e == ';') zend = e + 1;
+            else if (*e == '{') {
+                int bd = 0;
+                char* b = e;
+                while (*b) {
+                    if (*b == '{') bd++;
+                    else if (*b == '}') {
+                        bd--;
+                        if (!bd) {
+                            zend = b + 1;
+                            break;
+                        }
+                    }
+                    b++;
+                }
+            }
+            if (!zend) {
+                p += nlen;
+                continue;
+            }
+            for (char* z = ws; z < zend; z++)
+                if (*z != '\n') *z = ' ';
+            p = zend;
+        }
+    }
+}
+
 // FIX: strip_uniform_initializers
 //
 // Project Zomboid build 42 shaders use GLSL 1.20 syntax where
@@ -981,6 +1069,9 @@ void APIENTRY_GL4ES gl4es_glShaderSource(GLuint shader, GLsizei count, const GLc
             glshader->converted = strdup(glshader->source);
         } else if (globals4es.simple_shaderconv && !isFPEShader) {
             SHUT_LOGD("ZOMDROID_DBG: shader=%d path=SIMPLE_SHADERCONV\n", shader);glshader->converted = strip_uniform_initializers(glshader->converted);
+            // ZOMDROID FIX (invisible character): strip PZ's redefinitions of GLSL
+            // builtins (max/min/clamp) — GLES3 link fails on them.
+            zomdroid_strip_builtin_redefs(glshader->source);
             // ZOMDROID FIX (white-world root, final link): the SIMPLE path (the one PZ
             // actually uses) stripped GLSL uniform initializers WITHOUT recording them,
             // so set_uniforms_default_value never had anything to restore (zero DEFAULT
@@ -996,6 +1087,15 @@ void APIENTRY_GL4ES gl4es_glShaderSource(GLuint shader, GLsizei count, const GLc
             glshader->converted = strip_texture_lod_bias(glshader->converted,
                                                          glshader->type == GL_FRAGMENT_SHADER ? 1 : 0);
             glshader->converted = strdup(ConvertShaderConditionally(glshader));
+            // ZOMDROID FIX (invisible character, part 2): legalize PZ's GLSL-1.20-era
+            // mixed int/float calls to builtins (clamp(x,0,1.0) etc.) whose custom
+            // overloads we strip above. Guarded with #ifdef inside InsertExtension.
+            {
+                int zclen = (int)strlen(glshader->converted) + 1;
+                int zcip = FindPositionAfterVersion(glshader->converted);
+                glshader->converted =
+                        InsertExtension(glshader->converted, &zclen, zcip + 1, "GL_EXT_shader_implicit_conversions");
+            }
             glshader->is_converted_essl_320 = 0;
 
         } else {

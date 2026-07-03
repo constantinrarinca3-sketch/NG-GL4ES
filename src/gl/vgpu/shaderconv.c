@@ -58,6 +58,45 @@ bool has_valid_data(char arr[256]) {
     return false;
 }
 
+// ZOMDROID FIX (Codex): value parser for uniform initializers.
+// - skips the type constructor prefix ("vec2(" used to leak its '2' as the first float!)
+// - evaluates simple '/' and '*' chains ("1.0 / 64.0")
+// Returns the number of floats parsed (up to max).
+static int zomdroid_parse_values(const char* s, GLfloat* out, int max) {
+    const char* p = strchr(s, '(');
+    p = p ? p + 1 : s;
+    int n = 0;
+    while (*p && *p != ')' && n < max) {
+        char* end;
+        double v = strtod(p, &end);
+        if (end == p) {
+            p++;
+            continue;
+        }
+        const char* q = end;
+        while (isspace((unsigned char)*q)) q++;
+        while (*q == '/' || *q == '*') {
+            char zop = *q++;
+            while (isspace((unsigned char)*q)) q++;
+            char* e2;
+            double w = strtod(q, &e2);
+            if (e2 == q) break;
+            if (zop == '/') {
+                if (w == 0.0) break;
+                v /= w;
+            } else
+                v *= w;
+            q = e2;
+            while (isspace((unsigned char)*q)) q++;
+        }
+        out[n++] = (GLfloat)v;
+        p = q;
+        while (*p && *p != ',' && *p != ')') p++;
+        if (*p == ',') p++;
+    }
+    return n;
+}
+
 void set_uniforms_default_value(GLuint program, uniforms_declarations uniformVector, int uniformCount) {
     for (int i = 0; i < uniformCount; i++) {
         uniform_declaration_s* uniform = &uniformVector[i];
@@ -66,10 +105,29 @@ void set_uniforms_default_value(GLuint program, uniforms_declarations uniformVec
         // sampler without "= ..." killed defaults for everything after it, e.g. PZ
         // chunkShader: DIFFUSE/DEPTH precede `uniform int useTexture = 1`).
         if (!has_valid_data(uniform->variable)) break;
-        if (!has_valid_data(uniform->initial_value)) continue;
+        if (!has_valid_data(uniform->initial_value)) {
+            // ZOMDROID TEST: see whether "lost" defaults arrive here with an EMPTY value
+            // (lost at record/merge) or never arrive at all.
+            extern void zomdroid_gltrace(const char* fmt, ...);
+            static int zsk_budget = 60;
+            if (zsk_budget-- > 0)
+                zomdroid_gltrace("SKIPDEF prog=%u %s %s (no init)", program, uniform->type[0] ? uniform->type : "?",
+                                 uniform->variable);
+            continue;
+        }
         GLint location = gl4es_glGetUniformLocation(program, uniform->variable);
 
         if (location == -1) {
+            // ZOMDROID TEST: the only silent drop path — log it (model shaders lose
+            // FinalScale/targetDepth here while UVScale works; find out why).
+            {
+                extern void zomdroid_gltrace(const char* fmt, ...);
+                static int znd_budget = 60;
+                if (znd_budget-- > 0)
+                    zomdroid_gltrace("NODEFAULT prog=%u %s %s = %s (loc=-1)", program,
+                                     uniform->type[0] ? uniform->type : "?", uniform->variable,
+                                     uniform->initial_value);
+            }
             DBG(SHUT_LOGD("Uniform variable %s not found in shader program.\n", uniform->variable);)
             continue;
         }
@@ -101,19 +159,23 @@ void set_uniforms_default_value(GLuint program, uniforms_declarations uniformVec
                 continue;
             }
             if (strcmp(zt, "float") == 0) {
-                gl4es_glUniform1f(location, strtof(uniform->initial_value, NULL));
+                GLfloat zfv = 0.0f;
+                if (zomdroid_parse_values(uniform->initial_value, &zfv, 1) == 1)
+                    gl4es_glUniform1f(location, zfv);
+                else
+                    SHUT_LOGD("Invalid float initial value for uniform %s\n", uniform->variable);
                 continue;
             }
             if (strcmp(zt, "vec2") == 0 || strcmp(zt, "vec3") == 0 || strcmp(zt, "vec4") == 0) {
                 GLfloat zvv[4];
                 int zn = zt[3] - '0';
-                if (parse_floats_from_string(uniform->initial_value, zvv, zn) == zn) {
-                    if (zn == 2) gl4es_glUniform2fv(location, 1, zvv);
-                    else if (zn == 3) gl4es_glUniform3fv(location, 1, zvv);
-                    else gl4es_glUniform4fv(location, 1, zvv);
-                } else if (parse_floats_from_string(uniform->initial_value, zvv, 1) == 1) {
+                int zgot = zomdroid_parse_values(uniform->initial_value, zvv, zn);
+                if (zgot == 1 && zn > 1) {
                     // vecN(x) single-scalar constructor -> splat
                     for (int zj = 1; zj < zn; zj++) zvv[zj] = zvv[0];
+                    zgot = zn;
+                }
+                if (zgot == zn) {
                     if (zn == 2) gl4es_glUniform2fv(location, 1, zvv);
                     else if (zn == 3) gl4es_glUniform3fv(location, 1, zvv);
                     else gl4es_glUniform4fv(location, 1, zvv);
@@ -125,7 +187,15 @@ void set_uniforms_default_value(GLuint program, uniforms_declarations uniformVec
                 GLfloat zmv[16];
                 int zn = zt[3] - '0';
                 int zcnt = zn * zn;
-                if (parse_floats_from_string(uniform->initial_value, zmv, zcnt) == zcnt) {
+                int zgot = zomdroid_parse_values(uniform->initial_value, zmv, zcnt);
+                if (zgot == 1) {
+                    // matN(x) single-scalar constructor -> diagonal matrix
+                    GLfloat zd = zmv[0];
+                    for (int zj = 0; zj < zcnt; zj++) zmv[zj] = 0.0f;
+                    for (int zj = 0; zj < zn; zj++) zmv[zj * zn + zj] = zd;
+                    zgot = zcnt;
+                }
+                if (zgot == zcnt) {
                     if (zn == 2) gl4es_glUniformMatrix2fv(location, 1, GL_FALSE, zmv);
                     else if (zn == 3) gl4es_glUniformMatrix3fv(location, 1, GL_FALSE, zmv);
                     else gl4es_glUniformMatrix4fv(location, 1, GL_FALSE, zmv);
@@ -322,6 +392,12 @@ char* process_uniform_declarations(char* glslCode, uniforms_declarations uniform
                     uniformVector[*uniformCount].type[MAX_UNIFORM_TYPE_LENGTH - 1] = '\0';
                     strcpy(uniformVector[*uniformCount].initial_value, initial_value);
                     (*uniformCount)++;
+                    // ZOMDROID TEST: log every recorded declaration with an initializer
+                    if (initial_value[0]) {
+                        extern void zomdroid_gltrace(const char* fmt, ...);
+                        static int zdc_budget = 100;
+                        if (zdc_budget-- > 0) zomdroid_gltrace("DECL %s %s = %s", type, name, initial_value);
+                    }
                 }
 
                 while (*cursor && *cursor != ';')
@@ -594,8 +670,8 @@ vec4 vgpu_step(int x, vec4 y) { return step(float(x), y); }\n\
 vec4 vgpu_step(vec4 x, vec4 y) { return step(x, y); }\n\
 float vgpu_exp2(float x) { return exp2(x); }\n\
 float vgpu_exp2(int x) { return exp2(float(x)); }\n\
-vec2 vgpu_textureSize2D(sampler2D sampler, int level) { return vec2(textureSize(sampler, level)); }\n\
-vec4 vgpu_shadow2DProj(sampler2DShadow sampler, vec4 uv) { return vec4(textureProj(sampler, uv)); }\n\
+vec2 vgpu_textureSize2D(sampler2D zsmp, int level) { return vec2(textureSize(zsmp, level)); }\n\
+vec4 vgpu_shadow2DProj(sampler2DShadow zsmp, vec4 uv) { return vec4(textureProj(zsmp, uv)); }\n\
 ");
 
         shader_source->converted = source;
@@ -1043,43 +1119,43 @@ int doesShaderVersionContainsES(const char* source) {
 
 char* WrapIvecFunctions(char* source, int* sourceLength) {
     source = WrapFunction(source, sourceLength, "texelFetch", "vgpu_texelFetch",
-                          "\nvec4 vgpu_texelFetch(sampler2D sampler, vec2 P, float lod){return texelFetch(sampler, "
+                          "\nvec4 vgpu_texelFetch(sampler2D zsmp, vec2 P, float lod){return texelFetch(zsmp, "
                           "ivec2(int(P.x), int(P.y)), int(lod));}\n"
-                          "vec4 vgpu_texelFetch(sampler3D sampler, vec3 P, float lod){return texelFetch(sampler, "
+                          "vec4 vgpu_texelFetch(sampler3D zsmp, vec3 P, float lod){return texelFetch(zsmp, "
                           "ivec3(int(P.x), int(P.y), int(P.z)), int(lod));}\n"
-                          "vec4 vgpu_texelFetch(sampler2DArray sampler, vec3 P, float lod){return texelFetch(sampler, "
+                          "vec4 vgpu_texelFetch(sampler2DArray sampler, vec3 P, float lod){return texelFetch(zsmp, "
                           "ivec3(int(P.x), int(P.y), int(P.z)), int(lod));}\n"
                           "#ifdef GL_EXT_texture_buffer\n"
-                          "vec4 vgpu_texelFetch(samplerBuffer sampler, float P){return texelFetch(sampler, int(P));}\n"
+                          "vec4 vgpu_texelFetch(samplerBuffer sampler, float P){return texelFetch(zsmp, int(P));}\n"
                           "#endif\n"
                           "#ifdef GL_OES_texture_storage_multisample_2d_array\n"
-                          "vec4 vgpu_texelFetch(sampler2DMS sampler, vec2 P, float _sample){return texelFetch(sampler, "
+                          "vec4 vgpu_texelFetch(sampler2DMS sampler, vec2 P, float _sample){return texelFetch(zsmp, "
                           "ivec2(int(P.x), int(P.y)), int(_sample));}\n"
                           "vec4 vgpu_texelFetch(sampler2DMSArray sampler, vec3 P, float _sample){return "
-                          "texelFetch(sampler, ivec3(int(P.x), int(P.y), int(P.z)), int(_sample));}\n"
+                          "texelFetch(zsmp, ivec3(int(P.x), int(P.y), int(P.z)), int(_sample));}\n"
                           "#endif\n");
 
     source = WrapFunction(
         source, sourceLength, "textureSize", "vgpu_textureSize",
-        "\nvec2 vgpu_textureSize(sampler2D sampler, float lod){ivec2 size = textureSize(sampler, int(lod));return "
+        "\nvec2 vgpu_textureSize(sampler2D zsmp, float lod){ivec2 size = textureSize(zsmp, int(lod));return "
         "vec2(size.x, size.y);}\n"
-        "vec3 vgpu_textureSize(sampler3D sampler, float lod){ivec3 size = textureSize(sampler, int(lod));return "
+        "vec3 vgpu_textureSize(sampler3D zsmp, float lod){ivec3 size = textureSize(zsmp, int(lod));return "
         "vec3(size.x, size.y, size.z);}\n"
-        "vec2 vgpu_textureSize(samplerCube sampler, float lod){ivec2 size = textureSize(sampler, int(lod));return "
+        "vec2 vgpu_textureSize(samplerCube sampler, float lod){ivec2 size = textureSize(zsmp, int(lod));return "
         "vec2(size.x, size.y);}\n"
-        "vec2 vgpu_textureSize(sampler2DShadow sampler, float lod){ivec2 size = textureSize(sampler, int(lod));return "
+        "vec2 vgpu_textureSize(sampler2DShadow zsmp, float lod){ivec2 size = textureSize(zsmp, int(lod));return "
         "vec2(size.x, size.y);}\n"
-        "vec2 vgpu_textureSize(samplerCubeShadow sampler, float lod){ivec2 size = textureSize(sampler, "
+        "vec2 vgpu_textureSize(samplerCubeShadow sampler, float lod){ivec2 size = textureSize(zsmp, "
         "int(lod));return vec2(size.x, size.y);}\n"
         "#ifdef GL_EXT_texture_cube_map_array\n"
-        "vec3 vgpu_textureSize(samplerCubeArray sampler, float lod){ivec3 size = textureSize(sampler, int(lod));return "
+        "vec3 vgpu_textureSize(samplerCubeArray sampler, float lod){ivec3 size = textureSize(zsmp, int(lod));return "
         "vec3(size.x, size.y, size.z);}\n"
-        "vec3 vgpu_textureSize(samplerCubeArrayShadow sampler, float lod){ivec3 size = textureSize(sampler, "
+        "vec3 vgpu_textureSize(samplerCubeArrayShadow sampler, float lod){ivec3 size = textureSize(zsmp, "
         "int(lod));return vec3(size.x, size.y, size.z);}\n"
         "#endif\n"
-        "vec3 vgpu_textureSize(sampler2DArray sampler, float lod){ivec3 size = textureSize(sampler, int(lod));return "
+        "vec3 vgpu_textureSize(sampler2DArray sampler, float lod){ivec3 size = textureSize(zsmp, int(lod));return "
         "vec3(size.x, size.y, size.z);}\n"
-        "vec3 vgpu_textureSize(sampler2DArrayShadow sampler, float lod){ivec3 size = textureSize(sampler, "
+        "vec3 vgpu_textureSize(sampler2DArrayShadow sampler, float lod){ivec3 size = textureSize(zsmp, "
         "int(lod));return vec3(size.x, size.y, size.z);}\n"
         "#ifdef GL_EXT_texture_buffer\n"
         "float vgpu_textureSize(samplerBuffer sampler){return float(textureSize(sampler));}\n"

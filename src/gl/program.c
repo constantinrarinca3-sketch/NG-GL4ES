@@ -206,6 +206,24 @@ void APIENTRY_GL4ES gl4es_glAttachShader(GLuint program, GLuint shader) {
         glprogram->last_comp = glshader;
     // merge uniforms_declarations
     merge_uniforms(glprogram->declarations, glshader->uniforms_declarations);
+    // ZOMDROID TEST: map program<-shader and show what the program's declarations hold
+    // after the merge (FinalScale & co vanish between shader parse and program walk).
+    {
+        extern void zomdroid_gltrace(const char* fmt, ...);
+        static int zat_budget = 120;
+        if (zat_budget-- > 0) {
+            char zlist[220];
+            int zoff = 0;
+            zlist[0] = '\0';
+            for (int zi = 0; zi < MAX_UNIFORM_VARIABLE_NUMBER && zoff < 180; zi++) {
+                if (!glprogram->declarations[zi].variable[0]) break;
+                if (!glprogram->declarations[zi].initial_value[0]) continue;
+                zoff += snprintf(zlist + zoff, sizeof(zlist) - zoff, " %s", glprogram->declarations[zi].variable);
+            }
+            zomdroid_gltrace("ATTACH prog=%u shader=%u shader_decls=%d prog_inits:%s", program, shader,
+                             glshader->uniforms_declarations_count, zlist);
+        }
+    }
     // send to hadware
     LOAD_GLES2(glAttachShader);
     if (gles_glAttachShader) {
@@ -1091,6 +1109,24 @@ void APIENTRY_GL4ES gl4es_glLinkProgram(GLuint program) {
             GLsizei log_length = 0;
             gles_glGetProgramiv(glprogram->id, GL_INFO_LOG_LENGTH, &log_length);
             SHUT_LOGD("ZOMDROID_DBG: Link FAILED id=%d log_length=%d\n", glprogram->id, log_length);
+            // ZOMDROID TEST: reliable full dump of the failing program's shader sources
+            // (logcat drops lines — the file does not).
+            {
+                static int zfs_budget = 3;
+                if (zfs_budget-- > 0) {
+                    FILE* zf = fopen("/data/data/com.zomdroid/files/failed_shaders.txt", "a");
+                    if (zf) {
+                        fprintf(zf, "\n======== PROGRAM %u LINK FAILED ========\n", program);
+                        for (int zi = 0; zi < glprogram->attach_size; zi++) {
+                            struct shader_s* zsh = getShader(glprogram->attach[zi]);
+                            if (zsh)
+                                fprintf(zf, "-------- shader %u type=0x%X --------\n%s\n", zsh->id, zsh->type,
+                                        zsh->converted ? zsh->converted : "(null converted)");
+                        }
+                        fclose(zf);
+                    }
+                }
+            }
             {
                 GLint log_len = 0;
                 gles_glGetProgramiv(glprogram->id, GL_INFO_LOG_LENGTH, &log_len);
