@@ -799,6 +799,22 @@ void APIENTRY_GL4ES fpe_glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     scratch_t scratch = {0};
     realize_glenv(mode == GL_POINTS, first, count, 0, NULL, &scratch);
     LOAD_GLES(glDrawArrays);
+    // ZOMDROID TEST: catch the vision-cone if it renders via the FPE path
+    if (mode == GL_TRIANGLE_FAN) {
+        extern void zomdroid_gltrace(const char* fmt, ...);
+        LOAD_GLES(glGetIntegerv);
+        GLint zft_nd = -1, zft_vp[4] = {0, 0, 0, 0};
+        gles_glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &zft_nd);
+        gles_glGetIntegerv(GL_VIEWPORT, zft_vp);
+        zomdroid_gltrace("fpeArraysFAN cnt=%d tracked_draw=%d cur=%d NATIVE=%d vp=%d,%d %dx%d", count,
+                         glstate->fbo.fbo_draw ? (int)glstate->fbo.fbo_draw->id : -1,
+                         glstate->fbo.current_fb ? (int)glstate->fbo.current_fb->id : -1, zft_nd,
+                         zft_vp[0], zft_vp[1], zft_vp[2], zft_vp[3]);
+    }
+    {
+        extern void zomdroid_screen_probe(const char* site, GLenum mode, GLsizei count);
+        zomdroid_screen_probe("fpeArrays", mode, count);
+    }
     gles_glDrawArrays(mode, first, count);
     free_scratch(&scratch);
 }
@@ -818,6 +834,46 @@ void APIENTRY_GL4ES fpe_glDrawElements(GLenum mode, GLsizei count, GLenum type, 
         DBG(SHUT_LOGD("Using VBO %d for indices\n", glstate->vao->elements->real_buffer);)
     }
     realize_bufferIndex();
+    // ZOMDROID TEST: catch the vision-cone if it renders via the FPE elements path
+    if (mode == GL_TRIANGLE_FAN) {
+        extern void zomdroid_gltrace(const char* fmt, ...);
+        LOAD_GLES(glGetIntegerv);
+        GLint zft_nd = -1;
+        gles_glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &zft_nd);
+        zomdroid_gltrace("fpeElemFAN cnt=%d tracked_draw=%d cur=%d NATIVE=%d", count,
+                         glstate->fbo.fbo_draw ? (int)glstate->fbo.fbo_draw->id : -1,
+                         glstate->fbo.current_fb ? (int)glstate->fbo.current_fb->id : -1, zft_nd);
+    }
+    {
+        extern void zomdroid_screen_probe(const char* site, GLenum mode, GLsizei count);
+        zomdroid_screen_probe("fpeElem", mode, count);
+    }
+    // ZOMDROID TEST: skip-class 1/2 — drop FPE-path composite quads for this run
+    // (1 = no app shader bound / FPE-generated program, 2 = app shader bound)
+    {
+        extern int zomdroid_skip_class(void);
+        extern int zomdroid_is_composite_quad(GLsizei count);
+        extern void zomdroid_gltrace(const char* fmt, ...);
+        int zcls = zomdroid_skip_class();
+        // class 4: skip ONLY the blended overlay quad (blend on, src=GL_ONE)
+        int zcls4_hit = 0;
+        if (zcls == 4 && zomdroid_is_composite_quad(count)) {
+            LOAD_GLES(glGetIntegerv);
+            GLint zb = 0, zs = -1;
+            gles_glGetIntegerv(GL_BLEND, &zb);
+            gles_glGetIntegerv(GL_BLEND_SRC_RGB, &zs);
+            zcls4_hit = (zb && zs == GL_ONE);
+        }
+        if (zcls4_hit || ((zcls == 1 || zcls == 2) && zomdroid_is_composite_quad(count) &&
+                          ((zcls == 1 && !glstate->glsl->program) || (zcls == 2 && glstate->glsl->program)))) {
+            static int zskip_logged = 0;
+            if (zskip_logged++ < 20)
+                zomdroid_gltrace("SKIPPED fpeElem quad cnt=%d appprog=%d", count, glstate->glsl->program);
+            if (use_vbo) wantBufferIndex(0);
+            free_scratch(&scratch);
+            return;
+        }
+    }
     gles_glDrawElements(mode, count, type, indices);
     if (use_vbo) wantBufferIndex(0);
     free_scratch(&scratch);
@@ -865,6 +921,10 @@ void APIENTRY_GL4ES fpe_glDrawArraysInstanced(GLenum mode, GLint first, GLsizei 
                     }
                 }
             }
+        {
+            extern void zomdroid_screen_probe(const char* site, GLenum mode, GLsizei count);
+            zomdroid_screen_probe("fpeArraysInst", mode, count);
+        }
         gles_glDrawArrays(mode, first, count);
     }
     free_scratch(&scratch);
@@ -925,6 +985,10 @@ void APIENTRY_GL4ES fpe_glDrawElementsInstanced(GLenum mode, GLsizei count, GLen
                     }
                 }
             }
+        {
+            extern void zomdroid_screen_probe(const char* site, GLenum mode, GLsizei count);
+            zomdroid_screen_probe("fpeElemInst", mode, count);
+        }
         gles_glDrawElements(mode, count, type, inds);
     }
     if (use_vbo) wantBufferIndex(0);

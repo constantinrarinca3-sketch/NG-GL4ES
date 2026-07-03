@@ -432,8 +432,10 @@ void initialize_gl4es() {
     env(LIBGL_BLENDHACK, globals4es.blendhack, "Change Blend GL_SRC_ALPHA, GL_ONE to GL_ONE, GL_ONE");
     env(LIBGL_BLENDCOLOR, globals4es.blendcolor, "Export a (faked) glBlendColor");
     env(LIBGL_NOERROR, globals4es.noerror, "glGetError() always return GL_NOERROR");
-    // ZOMDROID: PZ's Util.checkGLError aborts the render on a benign accumulated
-    // GL_INVALID_VALUE, causing a black screen. Force noerror so PZ doesn't abort.
+    // ZOMDROID: noerror force RESTORED after ladder-H. The fridge save runs clean without
+    // it, but fresh-save content still hits an (untraced) GL_INVALID_OPERATION source; with
+    // errors visible PZ's RenderThread throws OpenGLException and the game loop wedges
+    // (frozen input/menu). Keep the crutch until that source is found and fixed.
     globals4es.noerror = 1;
 
     globals4es.silentstub = 1;
@@ -828,11 +830,15 @@ void initialize_gl4es() {
     if (GetEnvVarFloat("LIBGL_FB_TEX_SCALE", &globals4es.fbtexscale, 0.0f)) {
         SHUT_LOGD("Framebuffer Textures will be scaled by %.2f", globals4es.fbtexscale);
     }
-    // ZOMDROID: one-shot liveness marker; SILENT build — no per-draw diagnostics.
+    // ZOMDROID TEST: liveness marker — proves the deployed lib and the tracer are active
     {
         extern void zomdroid_gltrace(const char* fmt, ...);
-        zomdroid_gltrace("INIT ladder-L SILENT (c53905f + EBO fix only), noerror=%d skiptexcopies=%d",
-                         globals4es.noerror, globals4es.skiptexcopies);
+        {
+            extern int zomdroid_skip_class(void);
+            zomdroid_gltrace("INIT ladder-Q2 (Q + native useTexture readback at composite) skip=%d noerror=%d "
+                             "simpleconv=%d",
+                             zomdroid_skip_class(), globals4es.noerror, globals4es.simple_shaderconv);
+        }
     }
 }
 

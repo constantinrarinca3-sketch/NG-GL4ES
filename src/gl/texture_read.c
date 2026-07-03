@@ -170,6 +170,28 @@ void APIENTRY_GL4ES gl4es_glCopyTexSubImage2D(GLenum target, GLint level, GLint 
     // PUSH_IF_COMPILING(glCopyTexSubImage2D);
     FLUSH_BEGINEND;
 
+    // ZOMDROID TEST: copy-from-framebuffer is a chunk-cache-update suspect (frozen world).
+    // Log destination texture, source rect, tracked vs NATIVE READ binding, pending error,
+    // and whether the copy is being skipped by LIBGL_SKIPTEXCOPIES.
+    {
+        extern void zomdroid_gltrace(const char* fmt, ...);
+        static int zcp_budget = 600;
+        if (zcp_budget > 0) {
+            zcp_budget--;
+            LOAD_GLES(glGetIntegerv);
+            LOAD_GLES(glGetError);
+            GLint znr = -1;
+            gles_glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &znr);
+            GLenum zpend = gles_glGetError();
+            gltexture_t* zbt = glstate->texture.bound[glstate->texture.active][itarget];
+            zomdroid_gltrace("COPYSUB tex=%u lvl=%d off=%d,%d src=%d,%d %dx%d tracked_read=%d NATIVE_read=%d "
+                             "pend_err=0x%X skipflag=%d",
+                             zbt ? zbt->glname : 0, level, xoffset, yoffset, x, y, width, height,
+                             glstate->fbo.fbo_read ? (int)glstate->fbo.fbo_read->id : -1, znr, zpend,
+                             globals4es.skiptexcopies);
+        }
+    }
+
     if (globals4es.skiptexcopies) {
         DBG(SHUT_LOGD("glCopyTexSubImage2D skipped.\n"));
         return;

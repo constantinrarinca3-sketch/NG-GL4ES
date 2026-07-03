@@ -173,6 +173,9 @@ void merge_uniforms(uniforms_declarations uniforms1, uniforms_declarations unifo
         //  uniforms_declarations2 еԪص uniforms_declarations1
         if (uniforms2[j].initial_value[0] != '\0') { // ֻƷǿյԪ
             strncpy(uniforms1[i].variable, uniforms2[j].variable, MAX_VARIABLE_LENGTH);
+            // ZOMDROID FIX: carry the declared type too — without it the defaults
+            // dispatcher can't type scalar initializers ("= 1") and drops them.
+            strncpy(uniforms1[i].type, uniforms2[j].type, MAX_UNIFORM_TYPE_LENGTH);
             strncpy(uniforms1[i].initial_value, uniforms2[j].initial_value, MAX_INITIAL_VALUE_LENGTH);
             i++;
         }
@@ -1071,8 +1074,18 @@ void APIENTRY_GL4ES gl4es_glLinkProgram(GLuint program) {
         gles_glGetProgramiv(glprogram->id, GL_LINK_STATUS, &glprogram->linked);
         SHUT_LOGD("ZOMDROID_DBG: glLinkProgram id=%d linked=%d\n", glprogram->id, glprogram->linked);
         if (glprogram->linked) {
-            set_uniforms_default_value(program, glprogram->declarations, MAX_UNIFORM_VARIABLE_NUMBER);
+            // ZOMDROID FIX (white-world root, part 2): set_uniforms_default_value ran
+            // BEFORE fill_program, so every glGetUniformLocation returned -1 and all
+            // GLSL uniform initializers (stripped by the converter) were silently lost.
+            // Fill the location table first, then ACTIVATE this program (glUniform* target
+            // the active program) and restore defaults, then restore the previous program.
             fill_program(glprogram);
+            {
+                GLuint zprev = (glstate->glsl && glstate->glsl->program) ? glstate->glsl->program : 0;
+                gl4es_glUseProgram(program);
+                set_uniforms_default_value(program, glprogram->declarations, MAX_UNIFORM_VARIABLE_NUMBER);
+                gl4es_glUseProgram(zprev);
+            }
             noerrorShimNoPurge();
         } else {
             GLsizei log_length = 0;

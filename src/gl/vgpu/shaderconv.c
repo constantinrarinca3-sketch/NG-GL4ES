@@ -61,14 +61,79 @@ bool has_valid_data(char arr[256]) {
 void set_uniforms_default_value(GLuint program, uniforms_declarations uniformVector, int uniformCount) {
     for (int i = 0; i < uniformCount; i++) {
         uniform_declaration_s* uniform = &uniformVector[i];
-        if (!has_valid_data(uniform->variable) || !has_valid_data(uniform->initial_value)) {
-            break;
-        }
+        // ZOMDROID FIX: end of list only when the NAME is empty; a uniform without an
+        // initializer must be SKIPPED, not abort the whole walk (was `break` — the first
+        // sampler without "= ..." killed defaults for everything after it, e.g. PZ
+        // chunkShader: DIFFUSE/DEPTH precede `uniform int useTexture = 1`).
+        if (!has_valid_data(uniform->variable)) break;
+        if (!has_valid_data(uniform->initial_value)) continue;
         GLint location = gl4es_glGetUniformLocation(program, uniform->variable);
 
         if (location == -1) {
             DBG(SHUT_LOGD("Uniform variable %s not found in shader program.\n", uniform->variable);)
             continue;
+        }
+
+        // ZOMDROID TEST: prove default delivery in the trace
+        {
+            extern void zomdroid_gltrace(const char* fmt, ...);
+            static int zdef_budget = 80;
+            if (zdef_budget-- > 0)
+                zomdroid_gltrace("DEFAULT prog=%u %s %s = %s loc=%d", program,
+                                 uniform->type[0] ? uniform->type : "?", uniform->variable, uniform->initial_value,
+                                 location);
+        }
+
+        // ZOMDROID FIX: dispatch on the DECLARED TYPE (scalar initializers like "1" or
+        // "0.0" contain no type keyword, so the old strstr(initial_value, ...) chain fell
+        // through to the error branch and the default was never applied — this was the
+        // white-world root: chunkShader's `uniform int useTexture = 1` stayed 0).
+        const char* zt = uniform->type;
+        if (zt[0]) {
+            if (strcmp(zt, "int") == 0 || strncmp(zt, "sampler", 7) == 0) {
+                gl4es_glUniform1i(location, (GLint)strtol(uniform->initial_value, NULL, 10));
+                continue;
+            }
+            if (strcmp(zt, "bool") == 0) {
+                GLint zbv = parse_bool_from_string(uniform->initial_value);
+                if (zbv == -1) zbv = (strtol(uniform->initial_value, NULL, 10) != 0);
+                gl4es_glUniform1i(location, zbv);
+                continue;
+            }
+            if (strcmp(zt, "float") == 0) {
+                gl4es_glUniform1f(location, strtof(uniform->initial_value, NULL));
+                continue;
+            }
+            if (strcmp(zt, "vec2") == 0 || strcmp(zt, "vec3") == 0 || strcmp(zt, "vec4") == 0) {
+                GLfloat zvv[4];
+                int zn = zt[3] - '0';
+                if (parse_floats_from_string(uniform->initial_value, zvv, zn) == zn) {
+                    if (zn == 2) gl4es_glUniform2fv(location, 1, zvv);
+                    else if (zn == 3) gl4es_glUniform3fv(location, 1, zvv);
+                    else gl4es_glUniform4fv(location, 1, zvv);
+                } else if (parse_floats_from_string(uniform->initial_value, zvv, 1) == 1) {
+                    // vecN(x) single-scalar constructor -> splat
+                    for (int zj = 1; zj < zn; zj++) zvv[zj] = zvv[0];
+                    if (zn == 2) gl4es_glUniform2fv(location, 1, zvv);
+                    else if (zn == 3) gl4es_glUniform3fv(location, 1, zvv);
+                    else gl4es_glUniform4fv(location, 1, zvv);
+                } else
+                    SHUT_LOGD("Invalid %s initial value for uniform %s\n", zt, uniform->variable);
+                continue;
+            }
+            if (strcmp(zt, "mat2") == 0 || strcmp(zt, "mat3") == 0 || strcmp(zt, "mat4") == 0) {
+                GLfloat zmv[16];
+                int zn = zt[3] - '0';
+                int zcnt = zn * zn;
+                if (parse_floats_from_string(uniform->initial_value, zmv, zcnt) == zcnt) {
+                    if (zn == 2) gl4es_glUniformMatrix2fv(location, 1, GL_FALSE, zmv);
+                    else if (zn == 3) gl4es_glUniformMatrix3fv(location, 1, GL_FALSE, zmv);
+                    else gl4es_glUniformMatrix4fv(location, 1, GL_FALSE, zmv);
+                } else
+                    SHUT_LOGD("Invalid %s initial value for uniform %s\n", zt, uniform->variable);
+                continue;
+            }
+            // unknown type string: fall through to the legacy strstr chain below
         }
 
         if (strstr(uniform->initial_value, "mat4") != NULL) {
@@ -251,6 +316,10 @@ char* process_uniform_declarations(char* glslCode, uniforms_declarations uniform
 
                 if (*uniformCount >= 0) {
                     strcpy(uniformVector[*uniformCount].variable, name);
+                    // ZOMDROID FIX: keep the declared type — set_uniforms_default_value
+                    // must dispatch on it (scalar initializers like "= 1" carry no type).
+                    strncpy(uniformVector[*uniformCount].type, type, MAX_UNIFORM_TYPE_LENGTH - 1);
+                    uniformVector[*uniformCount].type[MAX_UNIFORM_TYPE_LENGTH - 1] = '\0';
                     strcpy(uniformVector[*uniformCount].initial_value, initial_value);
                     (*uniformCount)++;
                 }

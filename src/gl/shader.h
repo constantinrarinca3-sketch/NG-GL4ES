@@ -9,8 +9,11 @@
 #define MAX_INITIAL_VALUE_LENGTH 1024
 #define MAX_UNIFORM_VARIABLE_NUMBER 1024
 
+#define MAX_UNIFORM_TYPE_LENGTH 64
+
 typedef struct {
     char variable[MAX_VARIABLE_LENGTH];
+    char type[MAX_UNIFORM_TYPE_LENGTH]; // ZOMDROID FIX: declared GLSL type (was parsed then dropped)
     char initial_value[MAX_INITIAL_VALUE_LENGTH];
 } uniform_declaration_s;
 
