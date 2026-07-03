@@ -1112,7 +1112,7 @@ void APIENTRY_GL4ES gl4es_glLinkProgram(GLuint program) {
             // ZOMDROID TEST: reliable full dump of the failing program's shader sources
             // (logcat drops lines — the file does not).
             {
-                static int zfs_budget = 3;
+                static int zfs_budget = 10;
                 if (zfs_budget-- > 0) {
                     FILE* zf = fopen("/data/data/com.zomdroid/files/failed_shaders.txt", "a");
                     if (zf) {

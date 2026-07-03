@@ -111,7 +111,20 @@ static void proxy_glEnable(GLenum cap, bool enable, void (APIENTRY_GLES *next)(G
         case GL_BLEND: if(glstate->enable.blend != enable) {FLUSH_BEGINEND; glstate->enable.blend = enable; if(glstate->fpe_state && globals4es.shaderblend) { glstate->fpe_state->blend_enable = enable; } else next(cap);} break;
         proxy_GO(GL_CULL_FACE, cull_face);
         proxy_GO(GL_DEPTH_TEST, depth_test);
-        proxy_GO(GL_STENCIL_TEST, stencil_test);
+        // ZOMDROID LADDER-AA (diagnostic): stencil test force-disabled. PZ clips the
+        // inventory list via stencil (ALWAYS,1 write -> EQUAL,1 draw); the list is
+        // invisible = the mask write never lands. If disabling stencil makes the list
+        // APPEAR (even unclipped), the clip-write path is the confirmed culprit.
+        case GL_STENCIL_TEST: {
+            extern void zomdroid_gltrace(const char* fmt, ...);
+            static int zst_once = 1;
+            if (zst_once) {
+                zst_once = 0;
+                zomdroid_gltrace("STENCIL_TEST %s IGNORED (ladder-AA diagnostic)", enable ? "enable" : "disable");
+            }
+            noerrorShim();
+            return;
+        }
         // texgen
         GOFPE(GL_TEXTURE_GEN_S, texgen_s[glstate->texture.active], fpe_changetexgen_s(glstate->texture.active, enable)); //TODO: FPE stuffs
         GOFPE(GL_TEXTURE_GEN_T, texgen_t[glstate->texture.active], fpe_changetexgen_t(glstate->texture.active, enable));

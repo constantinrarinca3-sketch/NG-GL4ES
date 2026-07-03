@@ -835,7 +835,7 @@ void initialize_gl4es() {
         extern void zomdroid_gltrace(const char* fmt, ...);
         {
             extern int zomdroid_skip_class(void);
-            zomdroid_gltrace("INIT ladder-Y (X + zsmp param rename in wrappers) skip=%d noerror=%d "
+            zomdroid_gltrace("INIT ladder-AA (Z + stencil test force-disabled DIAGNOSTIC) skip=%d noerror=%d "
                              "simpleconv=%d",
                              zomdroid_skip_class(), globals4es.noerror, globals4es.simple_shaderconv);
         }
