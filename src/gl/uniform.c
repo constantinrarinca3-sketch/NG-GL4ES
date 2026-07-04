@@ -198,11 +198,26 @@ void GoUniformfv(program_t* glprogram, GLint location, int size, int count, cons
     uniform_t* m;
     k = kh_get(uniformlist, glprogram->uniform, location);
     if (k == kh_end(glprogram->uniform)) {
+        // ZOMDROID TEST: silent float-uniform drop (mirror of the iv-path log)
+        {
+            extern void zomdroid_gltrace(const char* fmt, ...);
+            static int zfnf_budget = 60;
+            if (zfnf_budget-- > 0)
+                zomdroid_gltrace("GoUniformfv loc=%d NOT-IN-TABLE prog=%u v0=%.2f", location, glprogram->id, value[0]);
+        }
         errorShim(GL_INVALID_OPERATION);
         return;
     }
     m = kh_value(glprogram->uniform, k);
     if (size != n_uniform(m->type) || !is_uniform_float(m->type) || count > m->size) {
+        // ZOMDROID TEST: type/size mismatch drop
+        {
+            extern void zomdroid_gltrace(const char* fmt, ...);
+            static int zftm_budget = 60;
+            if (zftm_budget-- > 0)
+                zomdroid_gltrace("GoUniformfv loc=%d TYPE-MISMATCH prog=%u type=0x%X", location, glprogram->id,
+                                 m->type);
+        }
         errorShim(GL_INVALID_OPERATION);
         return;
     }

@@ -7,6 +7,11 @@
 #include "loader.h"
 
 void APIENTRY_GL4ES gl4es_glStencilMask(GLuint mask) {
+    {
+        extern void zomdroid_gltrace(const char* fmt, ...);
+        static int zsm_budget = 60;
+        if (zsm_budget-- > 0) zomdroid_gltrace("STENCILMASK mask=0x%X", mask);
+    }
     if(!glstate->list.pending) 
         PUSH_IF_COMPILING(glStencilMask);
     LOAD_GLES(glStencilMask);
@@ -116,6 +121,11 @@ void APIENTRY_GL4ES gl4es_glStencilFuncSeparate(GLenum face, GLenum func, GLint 
 AliasExport(void,glStencilFuncSeparate,,(GLenum face, GLenum func, GLint ref, GLuint mask));
 
 void APIENTRY_GL4ES gl4es_glStencilOp(GLenum fail, GLenum zfail, GLenum zpass) {
+    {
+        extern void zomdroid_gltrace(const char* fmt, ...);
+        static int zso_budget = 60;
+        if (zso_budget-- > 0) zomdroid_gltrace("STENCILOP fail=0x%X zfail=0x%X zpass=0x%X", fail, zfail, zpass);
+    }
     if(!glstate->list.pending) 
         PUSH_IF_COMPILING(glStencilOp);
     if(  glstate->stencil.sfail[0]==glstate->stencil.sfail[1] && glstate->stencil.sfail[0]==fail
@@ -169,6 +179,11 @@ void APIENTRY_GL4ES gl4es_glStencilOpSeparate(GLenum face, GLenum sfail, GLenum 
 AliasExport(void,glStencilOpSeparate,,(GLenum face, GLenum sfail, GLenum zfail, GLenum zpass));
 
 void APIENTRY_GL4ES gl4es_glClearStencil(GLint s) {
+    {
+        extern void zomdroid_gltrace(const char* fmt, ...);
+        static int zcs_budget = 60;
+        if (zcs_budget-- > 0) zomdroid_gltrace("CLEARSTENCILVAL s=%d", s);
+    }
     if(!glstate->list.pending) 
         PUSH_IF_COMPILING(glClearStencil);
     if(  glstate->stencil.clear==s) {

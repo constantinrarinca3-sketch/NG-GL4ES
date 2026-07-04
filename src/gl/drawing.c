@@ -81,6 +81,23 @@ void zomdroid_screen_probe(const char* site, GLenum mode, GLsizei count) {
     static int zsp_budget = 2500;
     static int zov_budget = 1500;
     if (!glstate) return;
+    // ZOMDROID TEST (stencil root): log every draw issued while StencilOp zpass==REPLACE
+    // is set — these are PZ's clip-mask WRITE quads. If their fragments die (depth test /
+    // FPE alpha test / discard), the mask never lands and EQUAL,1 clips everything away.
+    if (glstate->stencil.dppass[0] == GL_REPLACE) {
+        extern void zomdroid_gltrace(const char* fmt, ...);
+        static int zsw_budget = 80;
+        if (zsw_budget-- > 0) {
+            LOAD_GLES(glGetIntegerv);
+            GLint zdt = -1, zbl = -1;
+            gles_glGetIntegerv(GL_DEPTH_TEST, &zdt);
+            gles_glGetIntegerv(GL_BLEND, &zbl);
+            zomdroid_gltrace("STWRITE %s mode=0x%X cnt=%d prog=%u cmask=%d%d%d%d depthEn=%d blend=%d alphaFPE=%d",
+                             site, mode, count, (unsigned)glstate->gleshard->program, glstate->colormask[0],
+                             glstate->colormask[1], glstate->colormask[2], glstate->colormask[3], zdt, zbl,
+                             glstate->fpe_state ? glstate->fpe_state->alphatest : -1);
+        }
+    }
     unsigned t0 = glstate->actual_tex2d ? glstate->actual_tex2d[0] : 0;
     unsigned t1 = glstate->actual_tex2d ? glstate->actual_tex2d[1] : 0;
     int f0 = zomdroid_is_fbo_tex(t0), f1 = zomdroid_is_fbo_tex(t1);

@@ -1173,11 +1173,23 @@ void realize_glenv(int ispoint, int first, int count, GLenum type, const void* i
         // but first, check if some fixedpipeline state (like GL_ALPHA_TEST) need to alter the original program
         fpe_state_t state;
         fpe_ReleventState(&state, glstate->fpe_state, 0);
+        // ZOMDROID FIX (invisible inventory/menu lists): when ALL color channels are
+        // masked off, the draw only produces stencil/depth side effects (PZ writes its
+        // UI clip masks exactly this way: ColorMask 0000 + StencilOp REPLACE). The FPE
+        // alpha-test customization must not discard these fragments — on desktop PZ the
+        // quad passes, here the injected discard killed the stencil write and EQUAL,1
+        // clipped every list to nothing.
+        if (!glstate->colormask[0] && !glstate->colormask[1] && !glstate->colormask[2] && !glstate->colormask[3])
+            state.alphatest = 0;
         GLuint program = glstate->glsl->program;
         program_t* glprogram = glstate->glsl->glprogram;
         if (glprogram->default_vertex) {
             fpe_state_t vertex_state;
             fpe_ReleventState_DefaultVertex(&vertex_state, glstate->fpe_state, glprogram->default_need);
+            // ZOMDROID FIX (part 2): same colormask-0000 rule for the DefaultVertex
+            // customization path — the menu/UI clip-write quads come through HERE.
+            if (!glstate->colormask[0] && !glstate->colormask[1] && !glstate->colormask[2] && !glstate->colormask[3])
+                vertex_state.alphatest = 0;
             if (!glprogram->fpe_cache) glprogram->fpe_cache = fpe_NewCache();
             glprogram =
                 fpe_CustomShader_DefaultVertex(glprogram, &vertex_state); // fetch from cache if exist or create it
@@ -1465,6 +1477,14 @@ void realize_glenv(int ispoint, int first, int count, GLenum type, const void* i
     // fpe
     if (glprogram->fpe_alpharef != -1) {
         float alpharef = floorf(glstate->alpharef * 255.f);
+        // ZOMDROID TEST (shredded text): trace the AlphaRef delivery
+        {
+            extern void zomdroid_gltrace(const char* fmt, ...);
+            static int zar_budget = 60;
+            if (zar_budget-- > 0)
+                zomdroid_gltrace("ALPHAREF prog=%u loc=%d val=%.0f func=0x%X", glprogram->id,
+                                 glprogram->fpe_alpharef, alpharef, glstate->alphafunc);
+        }
         GoUniformfv(glprogram, glprogram->fpe_alpharef, 1, 1, &alpharef);
     }
     if (glprogram->has_builtin_texsampler) {
