@@ -1,8 +1,5 @@
-#include <stdio.h>
-
 #include "../glx/hardext.h"
 #include "array.h"
-#include "program.h"
 #include "gl4es.h"
 #include "enum_info.h"
 #include "fpe.h"
@@ -20,178 +17,6 @@
 #else
 #define DBG(a)
 #endif
-
-// ZOMDROID TEST: skip-class selector, read once from a device file. Lets us disable one
-// class of composite quads per run WITHOUT rebuilding, to find which draw paints the
-// visible gray cone. 0/absent = skip nothing.
-// 1 = skip FPE-path composite quads with NO app shader (FPE-generated program)
-// 2 = skip FPE-path composite quads WITH app shader bound
-// 3 = skip shader-path (ElemCommon) composite quads
-int zomdroid_skip_class(void) {
-    static int cls = -1;
-    if (cls < 0) {
-        cls = 0;
-        FILE* f = fopen("/data/data/com.zomdroid/files/gl_skip.txt", "r");
-        if (f) {
-            if (fscanf(f, "%d", &cls) != 1) cls = 0;
-            fclose(f);
-        }
-    }
-    return cls;
-}
-
-// Is the upcoming native draw a "composite quad": small draw, to the SCREEN, sampling
-// at least two FBO-attachment textures (world FBO + mask FBO)?
-int zomdroid_is_composite_quad(GLsizei count) {
-    extern int zomdroid_is_fbo_tex(unsigned);
-    if (count > 6 || !glstate) return 0;
-    unsigned t0 = glstate->actual_tex2d ? glstate->actual_tex2d[0] : 0;
-    unsigned t1 = glstate->actual_tex2d ? glstate->actual_tex2d[1] : 0;
-    if (!zomdroid_is_fbo_tex(t0) || !zomdroid_is_fbo_tex(t1)) return 0;
-    LOAD_GLES(glGetIntegerv);
-    GLint zft_nd = -1;
-    gles_glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &zft_nd);
-    if (zft_nd != 0 && (GLuint)zft_nd != glstate->fbo.mainfbo_fbo) return 0;
-    return 1;
-}
-
-// ZOMDROID TEST: the OVERLAY texture — tex0 of the blended fullscreen composite quad
-// (src=GL_ONE dst=1-SRC_ALPHA). Its content is the lighting/vision overlay whose broken
-// alpha is suspected to paint the white floor + gray cone + flicker.
-static unsigned zomdroid_overlay_tex_v = 0;
-unsigned zomdroid_overlay_tex(void) {
-    return zomdroid_overlay_tex_v;
-}
-// native glname of color attachment 0 of the currently tracked draw FBO (0 if none)
-unsigned zomdroid_current_draw_att(void) {
-    if (!glstate || !glstate->fbo.fbo_draw) return 0;
-    if (!glstate->fbo.fbo_draw->color[0] || glstate->fbo.fbo_draw->t_color[0] == GL_RENDERBUFFER) return 0;
-    gltexture_t* t = gl4es_getTexture(glstate->fbo.fbo_draw->t_color[0], glstate->fbo.fbo_draw->color[0]);
-    return t ? t->glname : 0;
-}
-
-// ZOMDROID TEST: probe every native draw. Two cases:
-// (a) draw to SCREEN sampling FBO textures (composite passes) -> SCREENDRAW log;
-//     the blended one identifies the overlay texture.
-// (b) draw INTO the overlay FBO -> OVERLAYDRAW log (blend/colormask are the alpha suspects).
-// Called from all native draw sites (drawing.c + fpe.c).
-void zomdroid_screen_probe(const char* site, GLenum mode, GLsizei count) {
-    extern void zomdroid_gltrace(const char* fmt, ...);
-    extern int zomdroid_is_fbo_tex(unsigned);
-    static int zsp_budget = 2500;
-    static int zov_budget = 1500;
-    if (!glstate) return;
-    // ZOMDROID TEST (stencil root): log every draw issued while StencilOp zpass==REPLACE
-    // is set — these are PZ's clip-mask WRITE quads. If their fragments die (depth test /
-    // FPE alpha test / discard), the mask never lands and EQUAL,1 clips everything away.
-    if (glstate->stencil.dppass[0] == GL_REPLACE) {
-        extern void zomdroid_gltrace(const char* fmt, ...);
-        static int zsw_budget = 80;
-        if (zsw_budget-- > 0) {
-            LOAD_GLES(glGetIntegerv);
-            GLint zdt = -1, zbl = -1;
-            gles_glGetIntegerv(GL_DEPTH_TEST, &zdt);
-            gles_glGetIntegerv(GL_BLEND, &zbl);
-            zomdroid_gltrace("STWRITE %s mode=0x%X cnt=%d prog=%u cmask=%d%d%d%d depthEn=%d blend=%d alphaFPE=%d",
-                             site, mode, count, (unsigned)glstate->gleshard->program, glstate->colormask[0],
-                             glstate->colormask[1], glstate->colormask[2], glstate->colormask[3], zdt, zbl,
-                             glstate->fpe_state ? glstate->fpe_state->alphatest : -1);
-        }
-    }
-    unsigned t0 = glstate->actual_tex2d ? glstate->actual_tex2d[0] : 0;
-    unsigned t1 = glstate->actual_tex2d ? glstate->actual_tex2d[1] : 0;
-    int f0 = zomdroid_is_fbo_tex(t0), f1 = zomdroid_is_fbo_tex(t1);
-    LOAD_GLES(glGetIntegerv);
-    GLint zft_nd = -1;
-    gles_glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &zft_nd);
-    int to_screen = (zft_nd == 0 || (GLuint)zft_nd == glstate->fbo.mainfbo_fbo);
-    // native blend state (used by both cases)
-    GLint zsp_blend = 0, zsp_src = -1, zsp_dst = -1;
-    gles_glGetIntegerv(GL_BLEND, &zsp_blend);
-    gles_glGetIntegerv(GL_BLEND_SRC_RGB, &zsp_src);
-    gles_glGetIntegerv(GL_BLEND_DST_RGB, &zsp_dst);
-    if (to_screen) {
-        if ((!f0 && !f1) || zsp_budget <= 0) return; // not a composite-from-FBO draw
-        // learn the overlay texture from the blended composite quad
-        if (zsp_blend && zsp_src == GL_ONE && f0 && count <= 6) zomdroid_overlay_tex_v = t0;
-        GLint zft_vp[4] = {0, 0, 0, 0};
-        gles_glGetIntegerv(GL_VIEWPORT, zft_vp);
-        // sampler-uniform map: which texture unit does each sampler of the ACTIVE program read?
-        char zsp_tus[128];
-        int zsp_off = 0;
-        zsp_tus[0] = 0;
-        program_t* zsp_prog = glstate->gleshard->glprogram;
-        if (zsp_prog) {
-            for (int zi = 0; zi < MAX_TEX && zsp_prog->texunits[zi].type && zsp_off < 100; zi++)
-                zsp_off += snprintf(zsp_tus + zsp_off, sizeof(zsp_tus) - zsp_off, " s%d->tu%d", zi,
-                                    GetUniformi(zsp_prog, zsp_prog->texunits[zi].id));
-        }
-        // Codex fork probe: read the REAL value of useTexture straight from the driver
-        // (bypasses all gl4es bookkeeping) for the program actually drawing this quad.
-        GLint zut_loc = -1, zut_val = -999;
-        {
-            LOAD_GLES2(glGetUniformLocation);
-            LOAD_GLES2(glGetUniformiv);
-            if (gles_glGetUniformLocation && gles_glGetUniformiv) {
-                zut_loc = gles_glGetUniformLocation(glstate->gleshard->program, "useTexture");
-                if (zut_loc >= 0) gles_glGetUniformiv(glstate->gleshard->program, zut_loc, &zut_val);
-            }
-        }
-        zsp_budget--;
-        zomdroid_gltrace("SCREENDRAW %s mode=0x%X cnt=%d prog=%u tex0=%u%s tex1=%u%s tracked_draw=%d vp=%d,%d %dx%d "
-                         "blend=%d src=0x%X dst=0x%X%s useTex=%d(loc=%d)",
-                         site, mode, count, (unsigned)glstate->gleshard->program, t0, f0 ? "(FBO)" : "", t1,
-                         f1 ? "(FBO)" : "", glstate->fbo.fbo_draw ? (int)glstate->fbo.fbo_draw->id : -1, zft_vp[0],
-                         zft_vp[1], zft_vp[2], zft_vp[3], zsp_blend, zsp_src, zsp_dst, zsp_tus, zut_val, zut_loc);
-    } else {
-        // FBO-target transition log: which attachment receives draws, in order
-        {
-            static unsigned zft_last_att = 0;
-            static int ztr_budget = 2000;
-            unsigned zatt = zomdroid_current_draw_att();
-            if (zatt != zft_last_att && ztr_budget > 0) {
-                zft_last_att = zatt;
-                ztr_budget--;
-                zomdroid_gltrace("FBOTARGET att=%u fbo=%d", zatt,
-                                 glstate->fbo.fbo_draw ? (int)glstate->fbo.fbo_draw->id : -1);
-            }
-        }
-        // CHUNKPIX: sample 1 pixel from the current draw-target FBO every ~200 FBO draws.
-        // Decides the fork: (a) chunks stay all-zero -> fragments are being killed in the
-        // bake pass; (b) chunks have content -> it gets lost later, at composite.
-        {
-            static int zpx_counter = 0;
-            static int zpx_budget = 120;
-            if ((++zpx_counter % 200) == 0 && zpx_budget > 0) {
-                LOAD_GLES(glReadPixels);
-                LOAD_GLES(glBindFramebuffer);
-                LOAD_GLES(glGetError);
-                GLint zvp[4] = {0, 0, 0, 0};
-                gles_glGetIntegerv(GL_VIEWPORT, zvp);
-                GLint zoldread = -1;
-                gles_glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &zoldread);
-                gles_glBindFramebuffer(GL_READ_FRAMEBUFFER, zft_nd);
-                unsigned char zpx[4] = {9, 9, 9, 9};
-                gles_glGetError(); // clear pending
-                gles_glReadPixels(zvp[0] + zvp[2] / 2, zvp[1] + zvp[3] / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, zpx);
-                GLenum zpe = gles_glGetError();
-                gles_glBindFramebuffer(GL_READ_FRAMEBUFFER, zoldread);
-                zpx_budget--;
-                zomdroid_gltrace("CHUNKPIX att=%u fbo=%d vp=%dx%d px=%u,%u,%u,%u err=0x%X",
-                                 zomdroid_current_draw_att(),
-                                 glstate->fbo.fbo_draw ? (int)glstate->fbo.fbo_draw->id : -1, zvp[2], zvp[3], zpx[0],
-                                 zpx[1], zpx[2], zpx[3], zpe);
-            }
-        }
-        // draw into some FBO — is it the overlay?
-        if (!zomdroid_overlay_tex_v || zov_budget <= 0) return;
-        if (zomdroid_current_draw_att() != zomdroid_overlay_tex_v) return;
-        zov_budget--;
-        zomdroid_gltrace("OVERLAYDRAW %s mode=0x%X cnt=%d prog=%u tex0=%u blend=%d src=0x%X dst=0x%X cmask=%d%d%d%d",
-                         site, mode, count, (unsigned)glstate->gleshard->program, t0, zsp_blend, zsp_src, zsp_dst,
-                         glstate->colormask[0], glstate->colormask[1], glstate->colormask[2], glstate->colormask[3]);
-    }
-}
 
 static GLboolean is_cache_compatible(GLsizei count) {
 #define T2(AA, A, B)                                                                                                   \
@@ -625,31 +450,7 @@ if(count>500000) return;
 
         // POLYGON mode as LINE is "intercepted" and drawn using list
         if (instancecount == 1 || hardext.esversion == 1) {
-            extern void zomdroid_gltrace(const char* fmt, ...);
-            LOAD_GLES(glGetError);
-            gles_glGetError(); // ZOMDROID TEST: clear pending so the poll below attributes correctly
-            // ZOMDROID TEST (Codex plan): every TRIANGLE_FAN draw — tracked vs NATIVE
-            // framebuffer bindings + viewport. Shows whether the vision cone lands on
-            // screen because the native DRAW target diverged from gl4es tracking.
-            if (mode == GL_TRIANGLE_FAN) {
-                LOAD_GLES(glGetIntegerv);
-                GLint zft_ndraw = -1, zft_nread = -1, zft_vp[4] = {0, 0, 0, 0};
-                gles_glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &zft_ndraw);
-                gles_glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &zft_nread);
-                gles_glGetIntegerv(GL_VIEWPORT, zft_vp);
-                zomdroid_gltrace("FAN cnt=%d prog=%u tracked_draw=%d tracked_cur=%d NATIVE_draw=%d read=%d vp=%d,%d %dx%d",
-                                 count, (unsigned)glstate->gleshard->program,
-                                 glstate->fbo.fbo_draw ? (int)glstate->fbo.fbo_draw->id : -1,
-                                 glstate->fbo.current_fb ? (int)glstate->fbo.current_fb->id : -1, zft_ndraw, zft_nread,
-                                 zft_vp[0], zft_vp[1], zft_vp[2], zft_vp[3]);
-            }
-            zomdroid_screen_probe("ElemCommon", mode, count);
-            // ZOMDROID TEST: skip-class 3 — drop shader-path composite quads for this run
-            if (zomdroid_skip_class() == 3 && zomdroid_is_composite_quad(count)) {
-                extern void zomdroid_gltrace(const char* fmt, ...);
-                static int zskip_logged = 0;
-                if (zskip_logged++ < 20) zomdroid_gltrace("SKIPPED ElemCommon quad cnt=%d", count);
-            } else if (!iindices && !sindices)
+            if (!iindices && !sindices)
                 gles_glDrawArrays(mode, first, count);
             else {
                 // ZOMDROID FIX (proven by gl_trace 2026-07-02: 3001/3001 draws failed 0x502 with
@@ -662,38 +463,6 @@ if(count>500000) return;
                 gles_glDrawElements(mode, count, (sindices) ? GL_UNSIGNED_SHORT : GL_UNSIGNED_INT,
                                     (sindices ? ((void*)sindices) : ((void*)iindices)));
                 wantBufferIndex(zfix_old);
-            }
-            {
-                static int zft_drawerr_budget = 400; // don't let Draw-ERR flood drown the FAN lines
-                GLenum zft_e = gles_glGetError();
-                if (zft_e != GL_NO_ERROR && zft_drawerr_budget-- > 0) {
-                    // enrich: current draw FBO, its color attachment, bound textures, feedback check
-                    int zft_fbo = glstate->fbo.fbo_draw ? (int)glstate->fbo.fbo_draw->id : -1;
-                    unsigned zft_att_glname = 0;
-                    if (glstate->fbo.fbo_draw && glstate->fbo.fbo_draw->color[0] &&
-                        glstate->fbo.fbo_draw->t_color[0] != GL_RENDERBUFFER) {
-                        gltexture_t* zft_at =
-                            gl4es_getTexture(glstate->fbo.fbo_draw->t_color[0], glstate->fbo.fbo_draw->color[0]);
-                        if (zft_at) zft_att_glname = zft_at->glname;
-                    }
-                    // dump enabled hardware attribs: index, native VBO, mapped state
-                    char zft_attrs[256];
-                    int zft_off = 0;
-                    for (int zi = 0; zi < hardext.maxvattrib && zi < MAX_VATTRIB && zft_off < 200; zi++) {
-                        vertexattrib_t* va = &glstate->gleshard->vertexattrib[zi];
-                        if (va->enabled)
-                            zft_off += snprintf(zft_attrs + zft_off, sizeof(zft_attrs) - zft_off, " a%d:b%u%s", zi,
-                                                va->real_buffer,
-                                                (va->buffer && va->buffer->mapped) ? "(MAPPED)" : "");
-                    }
-                    zomdroid_gltrace("Draw NATIVE-ERR 0x%X mode=0x%X cnt=%d prog=%u fbo=%d att=%u ebo=%u%s%s", zft_e,
-                                     mode, count, (unsigned)glstate->gleshard->program, zft_fbo, zft_att_glname,
-                                     glstate->bind_buffer.index, zft_attrs,
-                                     (zft_att_glname && (zft_att_glname == glstate->actual_tex2d[0] ||
-                                                         zft_att_glname == glstate->actual_tex2d[1]))
-                                         ? " FEEDBACK!"
-                                         : "");
-                }
             }
         } else {
             if (!iindices && !sindices)
@@ -945,18 +714,6 @@ AliasExport(void, glDrawElements, , (GLenum mode, GLsizei count, GLenum type, co
 void APIENTRY_GL4ES gl4es_glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     DBG(SHUT_LOGD("glDrawArrays(%s, %d, %d), list=%p pending=%d\n", PrintEnum(mode), first, count, glstate->list.active,
                   glstate->list.pending);)
-    // ZOMDROID TEST: catch the visible vision-cone draw at its API entry
-    if (mode == GL_TRIANGLE_FAN) {
-        extern void zomdroid_gltrace(const char* fmt, ...);
-        LOAD_GLES(glGetIntegerv);
-        GLint zft_nd = -1, zft_vp[4] = {0, 0, 0, 0};
-        gles_glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &zft_nd);
-        gles_glGetIntegerv(GL_VIEWPORT, zft_vp);
-        zomdroid_gltrace("ArraysFAN cnt=%d tracked_draw=%d cur=%d NATIVE=%d prog=%u vp=%d,%d %dx%d", count,
-                         glstate->fbo.fbo_draw ? (int)glstate->fbo.fbo_draw->id : -1,
-                         glstate->fbo.current_fb ? (int)glstate->fbo.current_fb->id : -1, zft_nd,
-                         (unsigned)glstate->gleshard->program, zft_vp[0], zft_vp[1], zft_vp[2], zft_vp[3]);
-    }
     // special check for QUADS and TRIANGLES that need multiple of 4 or 3 vertex...
     count = adjust_vertices(mode, count);
 

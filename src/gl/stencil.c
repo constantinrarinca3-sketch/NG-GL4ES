@@ -7,11 +7,6 @@
 #include "loader.h"
 
 void APIENTRY_GL4ES gl4es_glStencilMask(GLuint mask) {
-    {
-        extern void zomdroid_gltrace(const char* fmt, ...);
-        static int zsm_budget = 60;
-        if (zsm_budget-- > 0) zomdroid_gltrace("STENCILMASK mask=0x%X", mask);
-    }
     if(!glstate->list.pending) 
         PUSH_IF_COMPILING(glStencilMask);
     LOAD_GLES(glStencilMask);
@@ -59,14 +54,6 @@ void APIENTRY_GL4ES gl4es_glStencilMaskSeparate(GLenum face, GLuint mask) {
 AliasExport(void,glStencilMaskSeparate,,(GLenum face, GLuint mask));
 
 void APIENTRY_GL4ES gl4es_glStencilFunc(GLenum func, GLint ref, GLuint mask) {
-    // ZOMDROID TEST: stencil clip is the other suspect for the invisible inventory list
-    {
-        extern void zomdroid_gltrace(const char* fmt, ...);
-        static int zst_budget = 80;
-        if (zst_budget-- > 0)
-            zomdroid_gltrace("STENCILFUNC func=0x%X ref=%d mask=0x%X fb=%d", func, ref, mask,
-                             glstate->fbo.current_fb ? (int)glstate->fbo.current_fb->id : -1);
-    }
     if(!glstate->list.pending)
         PUSH_IF_COMPILING(glStencilFunc);
     if(  glstate->stencil.func[0]==glstate->stencil.func[1] && glstate->stencil.func[0]==func
@@ -121,11 +108,6 @@ void APIENTRY_GL4ES gl4es_glStencilFuncSeparate(GLenum face, GLenum func, GLint 
 AliasExport(void,glStencilFuncSeparate,,(GLenum face, GLenum func, GLint ref, GLuint mask));
 
 void APIENTRY_GL4ES gl4es_glStencilOp(GLenum fail, GLenum zfail, GLenum zpass) {
-    {
-        extern void zomdroid_gltrace(const char* fmt, ...);
-        static int zso_budget = 60;
-        if (zso_budget-- > 0) zomdroid_gltrace("STENCILOP fail=0x%X zfail=0x%X zpass=0x%X", fail, zfail, zpass);
-    }
     if(!glstate->list.pending) 
         PUSH_IF_COMPILING(glStencilOp);
     if(  glstate->stencil.sfail[0]==glstate->stencil.sfail[1] && glstate->stencil.sfail[0]==fail
@@ -179,11 +161,6 @@ void APIENTRY_GL4ES gl4es_glStencilOpSeparate(GLenum face, GLenum sfail, GLenum 
 AliasExport(void,glStencilOpSeparate,,(GLenum face, GLenum sfail, GLenum zfail, GLenum zpass));
 
 void APIENTRY_GL4ES gl4es_glClearStencil(GLint s) {
-    {
-        extern void zomdroid_gltrace(const char* fmt, ...);
-        static int zcs_budget = 60;
-        if (zcs_budget-- > 0) zomdroid_gltrace("CLEARSTENCILVAL s=%d", s);
-    }
     if(!glstate->list.pending) 
         PUSH_IF_COMPILING(glClearStencil);
     if(  glstate->stencil.clear==s) {

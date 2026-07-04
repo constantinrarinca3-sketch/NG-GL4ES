@@ -105,41 +105,12 @@ void set_uniforms_default_value(GLuint program, uniforms_declarations uniformVec
         // sampler without "= ..." killed defaults for everything after it, e.g. PZ
         // chunkShader: DIFFUSE/DEPTH precede `uniform int useTexture = 1`).
         if (!has_valid_data(uniform->variable)) break;
-        if (!has_valid_data(uniform->initial_value)) {
-            // ZOMDROID TEST: see whether "lost" defaults arrive here with an EMPTY value
-            // (lost at record/merge) or never arrive at all.
-            extern void zomdroid_gltrace(const char* fmt, ...);
-            static int zsk_budget = 60;
-            if (zsk_budget-- > 0)
-                zomdroid_gltrace("SKIPDEF prog=%u %s %s (no init)", program, uniform->type[0] ? uniform->type : "?",
-                                 uniform->variable);
-            continue;
-        }
+        if (!has_valid_data(uniform->initial_value)) continue;
         GLint location = gl4es_glGetUniformLocation(program, uniform->variable);
 
         if (location == -1) {
-            // ZOMDROID TEST: the only silent drop path — log it (model shaders lose
-            // FinalScale/targetDepth here while UVScale works; find out why).
-            {
-                extern void zomdroid_gltrace(const char* fmt, ...);
-                static int znd_budget = 60;
-                if (znd_budget-- > 0)
-                    zomdroid_gltrace("NODEFAULT prog=%u %s %s = %s (loc=-1)", program,
-                                     uniform->type[0] ? uniform->type : "?", uniform->variable,
-                                     uniform->initial_value);
-            }
             DBG(SHUT_LOGD("Uniform variable %s not found in shader program.\n", uniform->variable);)
             continue;
-        }
-
-        // ZOMDROID TEST: prove default delivery in the trace
-        {
-            extern void zomdroid_gltrace(const char* fmt, ...);
-            static int zdef_budget = 80;
-            if (zdef_budget-- > 0)
-                zomdroid_gltrace("DEFAULT prog=%u %s %s = %s loc=%d", program,
-                                 uniform->type[0] ? uniform->type : "?", uniform->variable, uniform->initial_value,
-                                 location);
         }
 
         // ZOMDROID FIX: dispatch on the DECLARED TYPE (scalar initializers like "1" or
@@ -392,12 +363,6 @@ char* process_uniform_declarations(char* glslCode, uniforms_declarations uniform
                     uniformVector[*uniformCount].type[MAX_UNIFORM_TYPE_LENGTH - 1] = '\0';
                     strcpy(uniformVector[*uniformCount].initial_value, initial_value);
                     (*uniformCount)++;
-                    // ZOMDROID TEST: log every recorded declaration with an initializer
-                    if (initial_value[0]) {
-                        extern void zomdroid_gltrace(const char* fmt, ...);
-                        static int zdc_budget = 100;
-                        if (zdc_budget-- > 0) zomdroid_gltrace("DECL %s %s = %s", type, name, initial_value);
-                    }
                 }
 
                 while (*cursor && *cursor != ';')

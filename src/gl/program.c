@@ -206,24 +206,6 @@ void APIENTRY_GL4ES gl4es_glAttachShader(GLuint program, GLuint shader) {
         glprogram->last_comp = glshader;
     // merge uniforms_declarations
     merge_uniforms(glprogram->declarations, glshader->uniforms_declarations);
-    // ZOMDROID TEST: map program<-shader and show what the program's declarations hold
-    // after the merge (FinalScale & co vanish between shader parse and program walk).
-    {
-        extern void zomdroid_gltrace(const char* fmt, ...);
-        static int zat_budget = 120;
-        if (zat_budget-- > 0) {
-            char zlist[220];
-            int zoff = 0;
-            zlist[0] = '\0';
-            for (int zi = 0; zi < MAX_UNIFORM_VARIABLE_NUMBER && zoff < 180; zi++) {
-                if (!glprogram->declarations[zi].variable[0]) break;
-                if (!glprogram->declarations[zi].initial_value[0]) continue;
-                zoff += snprintf(zlist + zoff, sizeof(zlist) - zoff, " %s", glprogram->declarations[zi].variable);
-            }
-            zomdroid_gltrace("ATTACH prog=%u shader=%u shader_decls=%d prog_inits:%s", program, shader,
-                             glshader->uniforms_declarations_count, zlist);
-        }
-    }
     // send to hadware
     LOAD_GLES2(glAttachShader);
     if (gles_glAttachShader) {

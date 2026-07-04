@@ -1,8 +1,5 @@
 #include "uniform.h"
 
-// ZOMDROID TEST: file-scope tracer decl (used by GoUniformiv/GoUniformMatrix4fv polls)
-extern void zomdroid_gltrace(const char* fmt, ...);
-
 // ZOMDROID: dedup restored to stock behavior (ladder-M/M2/M3 experiments closed: camera
 // theory disproven; full dedup-off crashes Adreno via bogus uniform ids in custom-program
 // sync — that separate rot is tracked in delta13).
@@ -198,26 +195,11 @@ void GoUniformfv(program_t* glprogram, GLint location, int size, int count, cons
     uniform_t* m;
     k = kh_get(uniformlist, glprogram->uniform, location);
     if (k == kh_end(glprogram->uniform)) {
-        // ZOMDROID TEST: silent float-uniform drop (mirror of the iv-path log)
-        {
-            extern void zomdroid_gltrace(const char* fmt, ...);
-            static int zfnf_budget = 60;
-            if (zfnf_budget-- > 0)
-                zomdroid_gltrace("GoUniformfv loc=%d NOT-IN-TABLE prog=%u v0=%.2f", location, glprogram->id, value[0]);
-        }
         errorShim(GL_INVALID_OPERATION);
         return;
     }
     m = kh_value(glprogram->uniform, k);
     if (size != n_uniform(m->type) || !is_uniform_float(m->type) || count > m->size) {
-        // ZOMDROID TEST: type/size mismatch drop
-        {
-            extern void zomdroid_gltrace(const char* fmt, ...);
-            static int zftm_budget = 60;
-            if (zftm_budget-- > 0)
-                zomdroid_gltrace("GoUniformfv loc=%d TYPE-MISMATCH prog=%u type=0x%X", location, glprogram->id,
-                                 m->type);
-        }
         errorShim(GL_INVALID_OPERATION);
         return;
     }
@@ -266,18 +248,13 @@ void GoUniformiv(program_t* glprogram, GLint location, int size, int count, cons
 
     khint_t k;
     uniform_t* m;
-    extern void zomdroid_gltrace(const char* fmt, ...);
     k = kh_get(uniformlist, glprogram->uniform, location);
     if (k == kh_end(glprogram->uniform)) {
-        // ZOMDROID TEST: silent drop — the app-set value never reaches the shader
-        zomdroid_gltrace("GoUniformiv loc=%d NOT-IN-TABLE prog=%u v0=%d", location, glprogram->id, value[0]);
         errorShim(GL_INVALID_OPERATION);
         return;
     }
     m = kh_value(glprogram->uniform, k);
     if (size != n_uniform(m->type) || !is_uniform_int(m->type) || count > m->size) {
-        zomdroid_gltrace("GoUniformiv loc=%d TYPE-MISMATCH prog=%u type=0x%X size=%d/%d count=%d/%d", location,
-                         glprogram->id, m->type, size, n_uniform(m->type), count, m->size);
         errorShim(GL_INVALID_OPERATION);
         return;
     }
@@ -296,8 +273,6 @@ void GoUniformiv(program_t* glprogram, GLint location, int size, int count, cons
     LOAD_GLES2(glUniform3iv);
     LOAD_GLES2(glUniform4iv);
     if (gles_glUniform1iv) {
-        LOAD_GLES(glGetError);
-        gles_glGetError(); // ZOMDROID TEST: clear pre-existing error
         switch (size) {
         case 1:
             gles_glUniform1iv(m->id, count, value);
@@ -311,14 +286,6 @@ void GoUniformiv(program_t* glprogram, GLint location, int size, int count, cons
         case 4:
             gles_glUniform4iv(m->id, count, value);
             break;
-        }
-        // ZOMDROID TEST: did the native driver reject the uniform upload?
-        {
-            GLenum zft_e = gles_glGetError();
-            if (zft_e != GL_NO_ERROR)
-                zomdroid_gltrace("GoUniformiv NATIVE-ERR 0x%X loc=%d nat_id=%d prog=%u \"%s\" v0=%d gleshard_prog=%u",
-                                 zft_e, location, m->id, glprogram->id, m->name ? m->name : "?", value[0],
-                                 (unsigned)glstate->gleshard->program);
         }
         errorGL();
     } else
@@ -635,7 +602,7 @@ void GoUniformMatrix2fv(program_t* glprogram, GLint location, GLsizei count, GLb
     }
     // ok, check the value in the cache
     int rsize = sizeof(GLfloat) * 2 * 2 * count;
-    if (ZOMDROID_UNIFORM_DEDUP(count) && memcmp((char*)glprogram->cache.cache + m->cache_offs, v, rsize) == 0) {
+    if (memcmp((char*)glprogram->cache.cache + m->cache_offs, v, rsize) == 0) {
         if (heapbuf) free(heapbuf);
         noerrorShim();
         return; // nothing to do, same value already there
@@ -710,7 +677,7 @@ void GoUniformMatrix3fv(program_t* glprogram, GLint location, GLsizei count, GLb
     }
     // ok, check the value in the cache
     int rsize = sizeof(GLfloat) * 3 * 3 * count;
-    if (ZOMDROID_UNIFORM_DEDUP(count) && memcmp((char*)glprogram->cache.cache + m->cache_offs, v, rsize) == 0) {
+    if (memcmp((char*)glprogram->cache.cache + m->cache_offs, v, rsize) == 0) {
         if (heapbuf) free(heapbuf);
         noerrorShim();
         return; // nothing to do, same value already there
@@ -784,7 +751,7 @@ void GoUniformMatrix4fv(program_t* glprogram, GLint location, GLsizei count, GLb
     }
     // ok, check the value in the cache
     int rsize = sizeof(GLfloat) * 4 * 4 * count;
-    if (ZOMDROID_UNIFORM_DEDUP(count) && memcmp((char*)glprogram->cache.cache + m->cache_offs, v, rsize) == 0) {
+    if (memcmp((char*)glprogram->cache.cache + m->cache_offs, v, rsize) == 0) {
         if (heapbuf) free(heapbuf);
         noerrorShim();
         return; // nothing to do, same value already there
@@ -793,15 +760,7 @@ void GoUniformMatrix4fv(program_t* glprogram, GLint location, GLsizei count, GLb
     memcpy((char*)glprogram->cache.cache + m->cache_offs, v, rsize);
     LOAD_GLES2(glUniformMatrix4fv);
     if (gles_glUniformMatrix4fv) {
-        LOAD_GLES(glGetError);
-        gles_glGetError(); // ZOMDROID TEST: clear pending
         gles_glUniformMatrix4fv(m->id, count, GL_FALSE, v);
-        {
-            GLenum zft_e = gles_glGetError();
-            if (zft_e != GL_NO_ERROR)
-                zomdroid_gltrace("Matrix4fv NATIVE-ERR 0x%X loc=%d nat=%d cnt=%d prog=%u \"%s\"", zft_e, location,
-                                 m->id, count, glprogram->id, m->name ? m->name : "?");
-        }
         errorGL();
     } else {
         // printf("No GLES2 function\n");

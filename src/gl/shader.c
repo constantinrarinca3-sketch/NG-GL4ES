@@ -1078,12 +1078,6 @@ void APIENTRY_GL4ES gl4es_glShaderSource(GLuint shader, GLsizei count, const GLc
             // lines in traces). process_uniform_declarations strips AND records.
             glshader->source = process_uniform_declarations(glshader->source, glshader->uniforms_declarations,
                                                             &glshader->uniforms_declarations_count);
-            {
-                extern void zomdroid_gltrace(const char* fmt, ...);
-                static int zdecl_budget = 60;
-                if (zdecl_budget-- > 0)
-                    zomdroid_gltrace("DECLS shader=%u recorded=%d", shader, glshader->uniforms_declarations_count);
-            }
             glshader->converted = strip_texture_lod_bias(glshader->converted,
                                                          glshader->type == GL_FRAGMENT_SHADER ? 1 : 0);
             glshader->converted = strdup(ConvertShaderConditionally(glshader));

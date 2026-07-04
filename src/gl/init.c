@@ -830,15 +830,12 @@ void initialize_gl4es() {
     if (GetEnvVarFloat("LIBGL_FB_TEX_SCALE", &globals4es.fbtexscale, 0.0f)) {
         SHUT_LOGD("Framebuffer Textures will be scaled by %.2f", globals4es.fbtexscale);
     }
-    // ZOMDROID TEST: liveness marker — proves the deployed lib and the tracer are active
+    // ZOMDROID: one-shot liveness/build marker (zero per-frame cost) — lets tooling
+    // verify WHICH renderer actually loaded (Zomdroid resets the choice on new instances).
     {
         extern void zomdroid_gltrace(const char* fmt, ...);
-        {
-            extern int zomdroid_skip_class(void);
-            zomdroid_gltrace("INIT ladder-AF (glClear stencil-mask 0xFF + restore) skip=%d noerror=%d "
-                             "simpleconv=%d",
-                             zomdroid_skip_class(), globals4es.noerror, globals4es.simple_shaderconv);
-        }
+        zomdroid_gltrace("INIT ng_gl4es RELEASE-RC1 (june16 + fixes: uniforms/link/EBO/stencil), noerror=%d",
+                         globals4es.noerror);
     }
 }
 

@@ -97,17 +97,6 @@ void APIENTRY_GL4ES gl4es_glViewport(GLint x, GLint y, GLsizei width, GLsizei he
 }
 
 void APIENTRY_GL4ES gl4es_glScissor(GLint x, GLint y, GLsizei width, GLsizei height) {
-    // ZOMDROID TEST (invisible inventory list): log scissor rects to catch a Y-flip /
-    // wrong-target clip that empties PZ's UI list region.
-    {
-        extern void zomdroid_gltrace(const char* fmt, ...);
-        static int zsc_budget = 150;
-        if (zsc_budget-- > 0)
-            zomdroid_gltrace("SCISSOR x=%d y=%d w=%d h=%d fb=%d vp=%d,%d %dx%d", x, y, (int)width, (int)height,
-                             glstate->fbo.current_fb ? (int)glstate->fbo.current_fb->id : -1,
-                             glstate->raster.viewport.x, glstate->raster.viewport.y, glstate->raster.viewport.width,
-                             glstate->raster.viewport.height);
-    }
 	if (glstate->fbo.current_fb->id != 0) {
     	gltexture_t *tex = gl4es_getTexture(glstate->fbo.current_fb->t_color[0], glstate->fbo.current_fb->color[0]);
 		if (tex->fbtex_ratio > 0.0f) {

@@ -295,18 +295,6 @@ AliasExport(void, glInterleavedArrays, , (GLenum format, GLsizei stride, const G
 
 // immediate mode functions
 void APIENTRY_GL4ES gl4es_glBegin(GLenum mode) {
-    // ZOMDROID TEST: catch the visible vision-cone draw at its API entry
-    if (mode == GL_TRIANGLE_FAN) {
-        extern void zomdroid_gltrace(const char* fmt, ...);
-        LOAD_GLES(glGetIntegerv);
-        GLint zft_nd = -1, zft_vp[4] = {0, 0, 0, 0};
-        gles_glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &zft_nd);
-        gles_glGetIntegerv(GL_VIEWPORT, zft_vp);
-        zomdroid_gltrace("BeginFAN tracked_draw=%d cur=%d NATIVE=%d vp=%d,%d %dx%d",
-                         glstate->fbo.fbo_draw ? (int)glstate->fbo.fbo_draw->id : -1,
-                         glstate->fbo.current_fb ? (int)glstate->fbo.current_fb->id : -1, zft_nd, zft_vp[0], zft_vp[1],
-                         zft_vp[2], zft_vp[3]);
-    }
     glstate->list.begin = 1;
     if (!glstate->list.active) glstate->list.active = alloc_renderlist();
     // small optim... continue a render command if possible
@@ -1232,49 +1220,6 @@ void gl4es_glClear(GLbitfield mask) {
     // failed in a noise pattern -> PZ's clipped lists rendered as speckles. The clear now
     // runs with FULL write masks and RESTORES the app's masks afterwards (see below).
 
-    // ZOMDROID TEST (stencil root): log stencil-bit clears — PZ may write its UI clip
-    // region via scissor+clear instead of masked draws. Also report GL_STENCIL_BITS once.
-    if (mask & GL_STENCIL_BUFFER_BIT) {
-        extern void zomdroid_gltrace(const char* fmt, ...);
-        static int zsc_budget = 80;
-        static int zsb_once = 1;
-        if (zsb_once) {
-            zsb_once = 0;
-            LOAD_GLES(glGetIntegerv);
-            GLint zbits = -1;
-            gles_glGetIntegerv(GL_STENCIL_BITS, &zbits);
-            zomdroid_gltrace("STENCILBITS surface=%d", zbits);
-        }
-        if (zsc_budget-- > 0) {
-            LOAD_GLES(glGetIntegerv);
-            GLint zscen = -1;
-            gles_glGetIntegerv(GL_SCISSOR_TEST, &zscen);
-            zomdroid_gltrace("CLEAR-STENCIL clearval=%d scissorEn=%d scissor=%d,%d %dx%d fb=%d colorbit=%d",
-                             glstate->stencil.clear, zscen, glstate->raster.scissor.x, glstate->raster.scissor.y,
-                             glstate->raster.scissor.width, glstate->raster.scissor.height,
-                             glstate->fbo.current_fb ? (int)glstate->fbo.current_fb->id : -1,
-                             (mask & GL_COLOR_BUFFER_BIT) ? 1 : 0);
-        }
-    }
-    // ZOMDROID TEST: log clears of the overlay FBO — its clear ALPHA is the prime suspect
-    // for the opaque overlay (white floor / gray cone / flicker).
-    {
-        extern unsigned zomdroid_overlay_tex(void);
-        extern unsigned zomdroid_current_draw_att(void);
-        extern void zomdroid_gltrace(const char* fmt, ...);
-        unsigned zov = zomdroid_overlay_tex();
-        if (zov && (mask & GL_COLOR_BUFFER_BIT) && zomdroid_current_draw_att() == zov) {
-            static int zcl_budget = 200;
-            if (zcl_budget-- > 0) {
-                LOAD_GLES(glGetFloatv);
-                GLfloat zcc[4] = {0, 0, 0, 0};
-                gles_glGetFloatv(GL_COLOR_CLEAR_VALUE, zcc);
-                zomdroid_gltrace("OVERLAYCLEAR rgba=%.3f,%.3f,%.3f,%.3f cmask=%d%d%d%d", zcc[0], zcc[1], zcc[2],
-                                 zcc[3], glstate->colormask[0], glstate->colormask[1], glstate->colormask[2],
-                                 glstate->colormask[3]);
-            }
-        }
-    }
     {
         GLuint zold_smask = glstate->stencil.mask[0];
         GLboolean zold_dmask = glstate->depth.mask;
