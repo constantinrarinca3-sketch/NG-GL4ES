@@ -111,6 +111,158 @@ static void zomdroid_strip_builtin_redefs(char* src) {
     }
 }
 
+// ZOMDROID FIX (vehicle body / blur / water shaders — Adreno link failures):
+// Adreno's ESSL has NO implicit int->float conversions (and it ignores our
+// GL_EXT_shader_implicit_conversions request), so two desktop-GLSL idioms in PZ
+// shaders fail at link:
+//   1) const float X = <int expression>;   -> "non-matching types for const initializer"
+//   2) clamp(x, 0, 1) etc.                 -> "no matching overloaded function found"
+// Fix both at source level: wrap const-float initializers in float(...), and turn bare
+// integer literals inside builtin-call arguments into float literals (0 -> 0.0).
+static char* zomdroid_floatify_const_float(char* src) {
+    if (!src) return src;
+    int hits = 0;
+    for (const char* p = src; (p = strstr(p, "const float")) != NULL; p += 11)
+        hits++;
+    if (!hits) return src;
+    char* out = (char*)malloc(strlen(src) + hits * 8 + 1);
+    if (!out) return src;
+    const char* in = src;
+    char* o = out;
+    while (*in) {
+        if (!strncmp(in, "const float", 11) && !(isalnum((unsigned char)in[11]) || in[11] == '_') &&
+            (in == src || !(isalnum((unsigned char)in[-1]) || in[-1] == '_'))) {
+            const char* eq = in;
+            while (*eq && *eq != '=' && *eq != ';' && *eq != '{')
+                eq++;
+            const char* semi = (*eq == '=') ? strchr(eq, ';') : NULL;
+            if (semi) {
+                size_t head = (size_t)(eq - in) + 1;
+                memcpy(o, in, head);
+                o += head;
+                memcpy(o, " float(", 7);
+                o += 7;
+                memcpy(o, eq + 1, (size_t)(semi - eq - 1));
+                o += semi - eq - 1;
+                *o++ = ')';
+                *o++ = ';';
+                in = semi + 1;
+                continue;
+            }
+        }
+        *o++ = *in++;
+    }
+    *o = '\0';
+    free(src);
+    return out;
+}
+
+static char* zomdroid_floatify_builtin_args(char* src) {
+    if (!src) return src;
+    static const char* fns[] = {"clamp", "min", "max", "mix", "step", "smoothstep", "pow", "mod"};
+    size_t slen = strlen(src);
+    // mark every char that sits inside a builtin-call argument list
+    unsigned char* mark = (unsigned char*)calloc(slen + 1, 1);
+    if (!mark) return src;
+    for (unsigned fi = 0; fi < sizeof(fns) / sizeof(fns[0]); fi++) {
+        const char* name = fns[fi];
+        size_t nlen = strlen(name);
+        const char* p = src;
+        while ((p = strstr(p, name)) != NULL) {
+            if ((p > src && (isalnum((unsigned char)p[-1]) || p[-1] == '_' || p[-1] == '.')) ||
+                isalnum((unsigned char)p[nlen]) || p[nlen] == '_') {
+                p += nlen;
+                continue;
+            }
+            const char* q = p + nlen;
+            while (*q == ' ' || *q == '\t') q++;
+            if (*q != '(') {
+                p += nlen;
+                continue;
+            }
+            int depth = 0;
+            const char* e = q;
+            while (*e) {
+                if (*e == '(') depth++;
+                else if (*e == ')') {
+                    depth--;
+                    if (!depth) break;
+                }
+                e++;
+            }
+            if (*e == ')')
+                for (const char* z = q + 1; z < e; z++)
+                    mark[z - src] = 1;
+            p = q;
+        }
+    }
+    // count integer literals inside marked spans (outside [] indexing)
+    int hits = 0;
+    for (size_t i = 0; i < slen; i++) {
+        if (!mark[i] || !isdigit((unsigned char)src[i])) continue;
+        if (i > 0 && (isalnum((unsigned char)src[i - 1]) || src[i - 1] == '_' || src[i - 1] == '.')) continue;
+        size_t j = i;
+        while (j < slen && isdigit((unsigned char)src[j]))
+            j++;
+        if (j < slen && (src[j] == '.' || src[j] == 'x' || src[j] == 'X' || src[j] == 'e' || src[j] == 'E' ||
+                         src[j] == 'u' || src[j] == 'U' || isalpha((unsigned char)src[j]) || src[j] == '_')) {
+            i = j;
+            continue;
+        }
+        // skip array indices: look back for unbalanced '[' within the marked span
+        int bd = 0;
+        for (size_t k = i; k > 0 && mark[k - 1]; k--) {
+            if (src[k - 1] == ']') bd++;
+            else if (src[k - 1] == '[') bd--;
+        }
+        if (bd < 0) {
+            i = j;
+            continue;
+        }
+        hits++;
+        i = j;
+    }
+    if (!hits) {
+        free(mark);
+        return src;
+    }
+    char* out = (char*)malloc(slen + hits * 2 + 1);
+    if (!out) {
+        free(mark);
+        return src;
+    }
+    char* o = out;
+    for (size_t i = 0; i < slen;) {
+        if (mark[i] && isdigit((unsigned char)src[i]) &&
+            !(i > 0 && (isalnum((unsigned char)src[i - 1]) || src[i - 1] == '_' || src[i - 1] == '.'))) {
+            size_t j = i;
+            while (j < slen && isdigit((unsigned char)src[j]))
+                j++;
+            int isint = !(j < slen && (src[j] == '.' || src[j] == 'x' || src[j] == 'X' || src[j] == 'e' ||
+                                       src[j] == 'E' || src[j] == 'u' || src[j] == 'U' ||
+                                       isalpha((unsigned char)src[j]) || src[j] == '_'));
+            int bd = 0;
+            for (size_t k = i; k > 0 && mark[k - 1]; k--) {
+                if (src[k - 1] == ']') bd++;
+                else if (src[k - 1] == '[') bd--;
+            }
+            memcpy(o, src + i, j - i);
+            o += j - i;
+            if (isint && bd >= 0) {
+                *o++ = '.';
+                *o++ = '0';
+            }
+            i = j;
+            continue;
+        }
+        *o++ = src[i++];
+    }
+    *o = '\0';
+    free(mark);
+    free(src);
+    return out;
+}
+
 // FIX: strip_uniform_initializers
 //
 // Project Zomboid build 42 shaders use GLSL 1.20 syntax where
@@ -1072,6 +1224,10 @@ void APIENTRY_GL4ES gl4es_glShaderSource(GLuint shader, GLsizei count, const GLc
             // ZOMDROID FIX (invisible character): strip PZ's redefinitions of GLSL
             // builtins (max/min/clamp) — GLES3 link fails on them.
             zomdroid_strip_builtin_redefs(glshader->source);
+            // ZOMDROID FIX (vehicle/blur/water): Adreno has no implicit int->float —
+            // legalize const-float int initializers and int literals in builtin calls.
+            glshader->source = zomdroid_floatify_const_float(glshader->source);
+            glshader->source = zomdroid_floatify_builtin_args(glshader->source);
             // ZOMDROID FIX (white-world root, final link): the SIMPLE path (the one PZ
             // actually uses) stripped GLSL uniform initializers WITHOUT recording them,
             // so set_uniforms_default_value never had anything to restore (zero DEFAULT
