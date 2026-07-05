@@ -58,13 +58,25 @@ void zomdroid_gltrace(const char* fmt, ...) {
     static int count = 0;
     if (count > 12000) return;
     if (!init) { init = 1; f = fopen("/data/data/com.zomdroid/files/gl_trace.txt", "w"); }
-    if (!f) return;
-    va_list args;
-    va_start(args, fmt);
-    vfprintf(f, fmt, args);
-    va_end(args);
-    fputc('\n', f);
-    fflush(f);
+    if (f) {
+        va_list args;
+        va_start(args, fmt);
+        vfprintf(f, fmt, args);
+        va_end(args);
+        fputc('\n', f);
+        fflush(f);
+    }
+    // ZOMDROID DIAG: mirror to stderr — it lands in the console log that testers can
+    // export from Zomdroid WITHOUT adb (and it works even if the file open failed).
+    {
+        va_list args2;
+        va_start(args2, fmt);
+        fprintf(stderr, "[NGG] ");
+        vfprintf(stderr, fmt, args2);
+        va_end(args2);
+        fputc('\n', stderr);
+        fflush(stderr);
+    }
     count++;
 }
 
