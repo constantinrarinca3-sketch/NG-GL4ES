@@ -14,6 +14,14 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fvisibility=hidden")
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# ZOMDROID: Android 15+/Google Play require 16 KB page-size support — all ELF LOAD
+# segments must be aligned to 16384. The prebuilt libspirv-cross-c-shared.so in
+# library/android/arm64-v8a is likewise a 16 KB-aligned rebuild (SPIRV-Cross
+# vulkan-sdk-1.4.313.0).
+if(ANDROID)
+    add_link_options("-Wl,-z,max-page-size=16384")
+endif()
+
 # ZOMDROID: june16's old vgpu shaderconv overflows a stack buffer while inserting the
 # GLSL wrapper block (caught by the NDK default -fstack-protector-strong -> abort).
 # June16-era builds ran WITHOUT the protector and survived in practice; restore that.
