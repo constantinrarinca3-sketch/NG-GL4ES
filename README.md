@@ -1,3 +1,38 @@
+Zomdroid / Project Zomboid Build 42 adaptation (branch `zomdroid-base-june16`)
+====
+
+> This fork branch adapts **NG-GL4ES** for [Zomdroid](https://github.com/sandstranger) —
+> running **Project Zomboid Build 42** on Android devices **without usable Vulkan**
+> (MediaTek / Mali, PowerVR and other GLES-only GPUs, where the ZINK renderer is not
+> an option).
+
+During June–July 2026 this branch fixed the complete chain that kept PZ B42 unplayable
+on pure GLES:
+
+* **World rendered white/empty** — GLSL uniform initializers (`uniform int useTexture = 1;`)
+  were stripped by the converter without being recorded/restored; the whole
+  record→merge→restore pipeline was rebuilt (typed declarations, correct ordering,
+  value parser for `vecN(...)` constructors and `a / b` expressions).
+* **Invisible characters/zombies/vehicles** — PZ links several compilation units per
+  shader stage (desktop-GL habit, illegal in GLES) and redefines `max/min/clamp`;
+  fixed with builtin-redefinition stripping + the game's own `combineShaderSources`
+  mode (one-byte `ShaderUnit.class` patch, per game version).
+* **World draws silently dropped** — client-side index draws executed while a native
+  element buffer was bound (`GL_INVALID_OPERATION` on every world tile).
+* **Stencil-clipped UI shredded/empty** (inventory, menus) — `glClear` forced the
+  stencil write mask to `0x1` instead of `0xFF` and never restored it; also the FPE
+  alpha-test customization discarded ColorMask-0000 stencil-write quads.
+* **Vehicles/water/blur link failures on Adreno** — strict ESSL has no implicit
+  int→float conversions; `const float x = <int expr>` and `clamp(x, 0, 1)` idioms are
+  now legalized at source level.
+
+Each fix is documented in its commit message with the root-cause analysis. Upstream
+(BZLZHH/aaaapai) does **not** contain these fixes as of July 2026 — PR candidates.
+
+Original README below.
+
+---
+
 Krypton Wrapper
 ====
 
