@@ -1073,6 +1073,10 @@ void APIENTRY_GL4ES gl4es_glLinkProgram(GLuint program) {
         // Get Link Status
         gles_glGetProgramiv(glprogram->id, GL_LINK_STATUS, &glprogram->linked);
         SHUT_LOGD("ZOMDROID_DBG: glLinkProgram id=%d linked=%d\n", glprogram->id, glprogram->linked);
+        {
+            extern void zomdroid_gltrace(const char* fmt, ...);
+            zomdroid_gltrace("LINK prog=%u linked=%d", program, glprogram->linked);
+        }
         if (glprogram->linked) {
             // ZOMDROID FIX (white-world root, part 2): set_uniforms_default_value ran
             // BEFORE fill_program, so every glGetUniformLocation returned -1 and all

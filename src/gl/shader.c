@@ -551,6 +551,23 @@ void APIENTRY_GL4ES gl4es_glCompileShader(GLuint shader) {
             GLint status = 0;
             gles_glGetShaderiv(glshader->id, GL_COMPILE_STATUS, &status);
             SHUT_LOGD("ZOMDROID_DBG: glCompileShader id=%d status=%d\n", glshader->id, status);
+            {
+                extern void zomdroid_gltrace(const char* fmt, ...);
+                zomdroid_gltrace("COMPILE shader=%u native=%u status=%d", shader, glshader->id, status);
+                if (status != GL_TRUE) {
+                    // full failing source + driver log into the field-readable dump
+                    FILE* zf = fopen("/data/data/com.zomdroid/files/failed_shaders.txt", "a");
+                    if (zf) {
+                        char zlog[1024];
+                        GLint zlen = 0;
+                        gles_glGetShaderInfoLog(glshader->id, sizeof(zlog) - 1, &zlen, zlog);
+                        zlog[zlen > 0 ? zlen : 0] = '\0';
+                        fprintf(zf, "\n==== COMPILE FAILED shader %u (native %u) ====\nDRIVER LOG:\n%s\nSOURCE:\n%s\n",
+                                shader, glshader->id, zlog, glshader->converted ? glshader->converted : "(null)");
+                        fclose(zf);
+                    }
+                }
+            }
             if (status != GL_TRUE) {
                 DBG(SHUT_LOGD("LIBGL: Error while compiling shader %d. Original source is:\n%s\n=======\n",
                               glshader->id, glshader->source);)
@@ -1220,6 +1237,13 @@ void APIENTRY_GL4ES gl4es_glShaderSource(GLuint shader, GLsizei count, const GLc
             SHUT_LOGD("ZOMDROID_DBG: shader=%d path=DIRECT\n", shader);
             glshader->converted = strdup(glshader->source);
         } else if (globals4es.simple_shaderconv && !isFPEShader) {
+            // ZOMDROID DIAG (Mali field debugging): breadcrumb before conversion — a crash
+            // inside the converter shows as a trailing 'CONVERT begin' without 'end'.
+            {
+                extern void zomdroid_gltrace(const char* fmt, ...);
+                zomdroid_gltrace("CONVERT begin shader=%u type=0x%X len=%d", shader, glshader->type,
+                                 glshader->source ? (int)strlen(glshader->source) : -1);
+            }
             SHUT_LOGD("ZOMDROID_DBG: shader=%d path=SIMPLE_SHADERCONV\n", shader);glshader->converted = strip_uniform_initializers(glshader->converted);
             // ZOMDROID FIX (invisible character): strip PZ's redefinitions of GLSL
             // builtins (max/min/clamp) — GLES3 link fails on them.
@@ -1247,6 +1271,11 @@ void APIENTRY_GL4ES gl4es_glShaderSource(GLuint shader, GLsizei count, const GLc
                         InsertExtension(glshader->converted, &zclen, zcip + 1, "GL_EXT_shader_implicit_conversions");
             }
             glshader->is_converted_essl_320 = 0;
+            {
+                extern void zomdroid_gltrace(const char* fmt, ...);
+                zomdroid_gltrace("CONVERT end shader=%u clen=%d", shader,
+                                 glshader->converted ? (int)strlen(glshader->converted) : -1);
+            }
 
         } else {
             int glsl_version = getGLSLVersion(glshader->source);

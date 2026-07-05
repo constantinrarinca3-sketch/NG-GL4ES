@@ -834,7 +834,7 @@ void initialize_gl4es() {
     // verify WHICH renderer actually loaded (Zomdroid resets the choice on new instances).
     {
         extern void zomdroid_gltrace(const char* fmt, ...);
-        zomdroid_gltrace("INIT ng_gl4es RELEASE-RC2 (RC1 + int-to-float legalization: const-float, builtin args), noerror=%d",
+        zomdroid_gltrace("INIT ng_gl4es RC2-DIAG-MALI (breadcrumbs: CONVERT-COMPILE-LINK), noerror=%d",
                          globals4es.noerror);
     }
 }
