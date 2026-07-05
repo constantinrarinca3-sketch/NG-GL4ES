@@ -1,7 +1,7 @@
 Zomdroid / Project Zomboid Build 42 adaptation (branch `zomdroid-base-june16`)
 ====
 
-> This fork branch adapts **NG-GL4ES** for [Zomdroid](https://github.com/sandstranger) —
+> This fork branch adapts **NG-GL4ES** for [Zomdroid](https://github.com/udarmolota/zomDroid) —
 > running **Project Zomboid Build 42** on Android devices **without usable Vulkan**
 > (MediaTek / Mali, PowerVR and other GLES-only GPUs, where the ZINK renderer is not
 > an option).
