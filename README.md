@@ -38,7 +38,7 @@ Krypton Wrapper
 
 > [!NOTE]
 > 
-> This project may be no longer maintained.
+> The ORIGINAL project may be no longer maintained.
 
 > [!NOTE]
 > 
