@@ -1,6 +1,7 @@
 #include "logs.h"
 #include "init.h"
 #include <stdarg.h>
+#include <stdlib.h>
 #if defined(ANDROID) && defined(USE_ANDROID_LOG)
 #include <android/log.h>
 #endif
@@ -78,5 +79,19 @@ void zomdroid_gltrace(const char* fmt, ...) {
         fflush(stderr);
     }
     count++;
+}
+
+// ZOMDROID DIAG: distinguishes "someone called exit()" from a signal kill — on the Mali
+// tester the process dies at Bullet.init with NO signal traces anywhere; if this line
+// shows up in the log, the death is a plain exit() inside emulated code (box64 territory).
+static void zomdroid_exit_probe(void) {
+    zomdroid_gltrace("EXIT-PROBE: process exiting via exit(), not a signal kill");
+}
+void zomdroid_exit_probe_register(void) {
+    static int done = 0;
+    if (!done) {
+        done = 1;
+        atexit(zomdroid_exit_probe);
+    }
 }
 

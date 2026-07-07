@@ -355,7 +355,9 @@ char* process_uniform_declarations(char* glslCode, uniforms_declarations uniform
                     trim(initial_value);
                 }
 
-                if (*uniformCount >= 0) {
+                // ZOMDROID FIX: bound the table — entry 1024+ used to strcpy straight
+                // past the array into the rest of the owning struct and the heap.
+                if (*uniformCount >= 0 && *uniformCount < MAX_UNIFORM_VARIABLE_NUMBER) {
                     strcpy(uniformVector[*uniformCount].variable, name);
                     // ZOMDROID FIX: keep the declared type — set_uniforms_default_value
                     // must dispatch on it (scalar initializers like "= 1" carry no type).

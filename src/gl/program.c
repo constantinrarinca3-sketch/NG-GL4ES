@@ -21,6 +21,9 @@
 #define DBG(a)
 #endif
 
+// ZOMDROID DIAG: flight-recorder breadcrumbs (logs.c)
+extern void zomdroid_gltrace(const char* fmt, ...);
+
 // KH Map implementations
 KHASH_MAP_IMPL_INT(attribloclist, attribloc_t*);
 KHASH_MAP_IMPL_INT(uniformlist, uniform_t*);
@@ -885,7 +888,7 @@ int gl4es_useProgramBinary(GLuint program, int length, GLenum format, const void
     gles_glProgramBinary(glprogram->id, format, binary, length);
 
     gles_glGetProgramiv(glprogram->id, GL_LINK_STATUS, &glprogram->linked);
-    SHUT_LOGD("ZOMDROID_DBG: glLinkProgram id=%d linked=%d\n", glprogram->id, glprogram->linked);
+    ZOMDROID_VDBG("ZOMDROID_DBG: glLinkProgram id=%d linked=%d\n", glprogram->id, glprogram->linked);
     DBG(SHUT_LOGD(" link status = %d\n", glprogram->linked))
     if (glprogram->linked) {
         fill_program(glprogram);
@@ -959,8 +962,8 @@ void APIENTRY_GL4ES gl4es_glLinkProgram(GLuint program) {
         for (int i = 0; i < glprogram->attach_size; i++) {
             accumShaderNeeds(glprogram->attach[i], &needs);
         }
-        if(glprogram->last_vert) SHUT_LOGD("ZOMDROID_DBG: after accum vert->converted=%p\n", glprogram->last_vert->converted);
-        if(glprogram->last_frag) SHUT_LOGD("ZOMDROID_DBG: after accum frag->converted=%p\n", glprogram->last_frag->converted);
+        if(glprogram->last_vert) ZOMDROID_VDBG("ZOMDROID_DBG: after accum vert->converted=%p\n", glprogram->last_vert->converted);
+        if(glprogram->last_frag) ZOMDROID_VDBG("ZOMDROID_DBG: after accum frag->converted=%p\n", glprogram->last_frag->converted);
         // create one vertex shader if needed!
         if (!glprogram->last_vert) {
             glprogram->default_need = (shaderconv_need_t*)malloc(sizeof(shaderconv_need_t));
@@ -993,7 +996,7 @@ void APIENTRY_GL4ES gl4es_glLinkProgram(GLuint program) {
                 redoShader(glprogram->attach[i], &needs);
             }
         }
-        SHUT_LOGD("ZOMDROID_DBG: step A vert=%p\n", glprogram->last_vert ? glprogram->last_vert->converted : NULL);
+        ZOMDROID_VDBG("ZOMDROID_DBG: step A vert=%p\n", glprogram->last_vert ? glprogram->last_vert->converted : NULL);
         // check if Built-in VA are used, and if so, bind them to their proper location
         if (glprogram->last_vert && !glprogram->last_vert->is_converted_essl_320) {
             for (int i = 0; i < ATT_MAX; ++i) {
@@ -1001,8 +1004,8 @@ void APIENTRY_GL4ES gl4es_glLinkProgram(GLuint program) {
                 if (attribute) gl4es_glBindAttribLocation(glprogram->id, i, attribute);
             }
         }
-        SHUT_LOGD("ZOMDROID_DBG: step B vert=%p\n", glprogram->last_vert ? glprogram->last_vert->converted : NULL);
-        SHUT_LOGD("ZOMDROID_DBG: frag_data_changed=%d\n", glprogram->frag_data_changed);
+        ZOMDROID_VDBG("ZOMDROID_DBG: step B vert=%p\n", glprogram->last_vert ? glprogram->last_vert->converted : NULL);
+        ZOMDROID_VDBG("ZOMDROID_DBG: frag_data_changed=%d\n", glprogram->frag_data_changed);
         // for glBindFragDataLocation
         if (glprogram->last_vert && glprogram->frag_data_changed == 1) {
             LOAD_GLES2(glShaderSource);
@@ -1030,7 +1033,7 @@ void APIENTRY_GL4ES gl4es_glLinkProgram(GLuint program) {
         }
     } // end of !last_comp block
 
-    SHUT_LOGD("ZOMDROID_DBG: step C vert=%p len=%zu\n",
+    ZOMDROID_VDBG("ZOMDROID_DBG: step C vert=%p len=%zu\n",
               glprogram->last_vert ? glprogram->last_vert->converted : NULL,
               glprogram->last_vert && glprogram->last_vert->converted ? strlen(glprogram->last_vert->converted) : 0);
     // ok, continue with linking
@@ -1038,41 +1041,41 @@ void APIENTRY_GL4ES gl4es_glLinkProgram(GLuint program) {
     if (gles_glLinkProgram) {
         LOAD_GLES(glGetError);
         LOAD_GLES2(glGetProgramiv);
-        SHUT_LOGD("ZOMDROID_DBG: attach_size=%d\n", glprogram->attach_size);
+        ZOMDROID_VDBG("ZOMDROID_DBG: attach_size=%d\n", glprogram->attach_size);
         for(int i=0; i<glprogram->attach_size; i++)
-        SHUT_LOGD("ZOMDROID_DBG: attach[%d]=%d\n", i, glprogram->attach[i]);
-        if(glprogram->last_vert) SHUT_LOGD("ZOMDROID_DBG: last_vert id=%d\n", glprogram->last_vert->id);
-        if(glprogram->last_frag) SHUT_LOGD("ZOMDROID_DBG: last_frag id=%d\n", glprogram->last_frag->id);
+        ZOMDROID_VDBG("ZOMDROID_DBG: attach[%d]=%d\n", i, glprogram->attach[i]);
+        if(glprogram->last_vert) ZOMDROID_VDBG("ZOMDROID_DBG: last_vert id=%d\n", glprogram->last_vert->id);
+        if(glprogram->last_frag) ZOMDROID_VDBG("ZOMDROID_DBG: last_frag id=%d\n", glprogram->last_frag->id);
         if (glprogram->last_vert && glprogram->last_vert->converted) {
             const char* cv = glprogram->last_vert->converted;
-            SHUT_LOGD("ZOMDROID_DBG: VERT len=%zu first50=%.50s\n", strlen(cv), cv);
+            ZOMDROID_VDBG("ZOMDROID_DBG: VERT len=%zu first50=%.50s\n", strlen(cv), cv);
         }
         if (glprogram->last_frag && glprogram->last_frag->converted) {
             const char* cv = glprogram->last_frag->converted;
-            SHUT_LOGD("ZOMDROID_DBG: FRAG len=%zu first50=%.50s\n", strlen(cv), cv);
+            ZOMDROID_VDBG("ZOMDROID_DBG: FRAG len=%zu first50=%.50s\n", strlen(cv), cv);
         }
         if (glprogram->last_vert && glprogram->last_vert->converted) {
             char tmp[512];
             strncpy(tmp, glprogram->last_vert->converted, 511);
             tmp[511] = '\0';
             for(int i=0; tmp[i]; i++) if(tmp[i]=='\n') tmp[i]=' ';
-            SHUT_LOGD("ZOMDROID_DBG: VERT: %s\n", tmp);
+            ZOMDROID_VDBG("ZOMDROID_DBG: VERT: %s\n", tmp);
         }
         if (glprogram->last_frag && glprogram->last_frag->converted) {
             char tmp[512];
             strncpy(tmp, glprogram->last_frag->converted, 511);
             tmp[511] = '\0';
             for(int i=0; tmp[i]; i++) if(tmp[i]=='\n') tmp[i]=' ';
-            SHUT_LOGD("ZOMDROID_DBG: FRAG: %s\n", tmp);
+            ZOMDROID_VDBG("ZOMDROID_DBG: FRAG: %s\n", tmp);
         }
         GLint attached = 0;
         gles_glGetProgramiv(glprogram->id, GL_ATTACHED_SHADERS, &attached);
-        SHUT_LOGD("ZOMDROID_DBG: GPU attached shaders=%d\n", attached);
+        ZOMDROID_VDBG("ZOMDROID_DBG: GPU attached shaders=%d\n", attached);
         gles_glLinkProgram(glprogram->id);
         GLenum err = gles_glGetError();
         // Get Link Status
         gles_glGetProgramiv(glprogram->id, GL_LINK_STATUS, &glprogram->linked);
-        SHUT_LOGD("ZOMDROID_DBG: glLinkProgram id=%d linked=%d\n", glprogram->id, glprogram->linked);
+        ZOMDROID_VDBG("ZOMDROID_DBG: glLinkProgram id=%d linked=%d\n", glprogram->id, glprogram->linked);
         {
             extern void zomdroid_gltrace(const char* fmt, ...);
             zomdroid_gltrace("LINK prog=%u linked=%d", program, glprogram->linked);

@@ -496,6 +496,16 @@ void* APIENTRY_GL4ES gl4es_glMapBuffer(GLenum target, GLenum access) {
         errorShim(GL_INVALID_OPERATION);
         return NULL;
     }
+    // ZOMDROID FIX (same hole as glMapBufferRange): never hand out NULL/short storage.
+    if (!buff->data && buff->size > 0) {
+        extern void zomdroid_gltrace(const char* fmt, ...);
+        zomdroid_gltrace("MAP guard: buf=%u size=%zd had no shadow store", buff->buffer, (size_t)buff->size);
+        buff->data = calloc(1, (size_t)buff->size);
+        if (!buff->data) {
+            errorShim(GL_OUT_OF_MEMORY);
+            return NULL;
+        }
+    }
     buff->access = access; // not used
     buff->mapped = 1;
     buff->ranged = 0;
@@ -686,6 +696,32 @@ void* APIENTRY_GL4ES gl4es_glMapBufferRange(GLenum target, GLintptr offset, GLsi
     if (buff->mapped) {
         errorShim(GL_INVALID_OPERATION);
         return NULL;
+    }
+    if (offset < 0 || length < 0) {
+        errorShim(GL_INVALID_VALUE);
+        return NULL;
+    }
+    // ZOMDROID FIX (Mali ES3-mine, named by the GL3 probe): this "mapping" hands out a
+    // pointer into the client shadow store WITHOUT checking that it exists or covers
+    // offset+length. When PZ mapped a buffer before glBufferData (or past its size),
+    // the caller's first write through the returned pointer killed the process with no
+    // GL call on the stack — the silent Bullet.init death no catcher could see.
+    {
+        size_t zneed = (size_t)offset + (size_t)length;
+        if (zneed > 0 && (!buff->data || (size_t)buff->size < zneed)) {
+            extern void zomdroid_gltrace(const char* fmt, ...);
+            zomdroid_gltrace("MAPRANGE guard: buf=%u data=%p size=%zd need=%zd", buff->buffer, buff->data,
+                             (size_t)buff->size, zneed);
+            void* znd = realloc(buff->data, zneed);
+            if (!znd) {
+                errorShim(GL_OUT_OF_MEMORY);
+                return NULL;
+            }
+            size_t zold = buff->data ? (size_t)buff->size : 0;
+            if (zneed > zold) memset((char*)znd + zold, 0, zneed - zold);
+            buff->data = znd;
+            if ((size_t)buff->size < zneed) buff->size = (GLsizeiptr)zneed;
+        }
     }
     buff->access = access;
     buff->mapped = 1;

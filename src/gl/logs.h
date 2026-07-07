@@ -10,6 +10,24 @@ void LogFPrintf(FILE *fp,const char *fmt,...);
 EXPORT void LogPrintf(const char *fmt,...);
 void write_log(const char* format, ...);
 //----------------------------------------------------------------------------
+// ZOMDROID DIAG (Mali ES3-mine hunt): flight recorder + probes.
+void zomdroid_gltrace(const char* fmt, ...);
+void zomdroid_exit_probe_register(void);
+// One-shot usage probe for ES3-only entry points: logs the FIRST 3 calls per function
+// (then goes silent — zero flood). The last "GL3 use#" crumb before a silent death
+// names the poison candidate.
+// Verbose per-compile/link dumps: compiled OUT for play builds (they hammered
+// logcat + the log file on every shader). Re-enable by mapping to SHUT_LOGD.
+#define ZOMDROID_VDBG(...) do { } while (0)
+#define ZOMDROID_GL3PROBE() \
+    do { \
+        static int zp_c = 0; \
+        if (zp_c < 3) { \
+            zp_c++; \
+            zomdroid_gltrace("GL3 use#%d %s", zp_c, __func__); \
+        } \
+    } while (0)
+//----------------------------------------------------------------------------
 #ifdef GL4ES_SILENCE_MESSAGES
 	#define SHUT_LOGD(...)
 	#define SHUT_LOGD_NOPREFIX(...)

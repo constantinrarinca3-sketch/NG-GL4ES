@@ -1,4 +1,7 @@
 #include <iostream>
+#ifdef __ANDROID__
+#include <sys/system_properties.h>
+#endif
 #include <string>
 #include <cstring>
 #include <sstream>
@@ -418,7 +421,8 @@ extern "C"
 
     static std::string rendererString;
     static std::string versionString;
-    const GLubyte* APIENTRY_GL4ES gl4es_glGetString(GLenum name) {
+
+const GLubyte* APIENTRY_GL4ES gl4es_glGetString(GLenum name) {
         DBG(SHUT_LOGD("glGetString(%s)\n", PrintEnum(name));)
         if (!globals4es.esversion) set_es_version();
         errorShim(GL_NO_ERROR);

@@ -22,12 +22,11 @@ if(ANDROID)
     add_link_options("-Wl,-z,max-page-size=16384")
 endif()
 
-# ZOMDROID: june16's old vgpu shaderconv overflows a stack buffer while inserting the
-# GLSL wrapper block (caught by the NDK default -fstack-protector-strong -> abort).
-# June16-era builds ran WITHOUT the protector and survived in practice; restore that.
-# DEBT: fix the overflow properly or replace shaderconv with the newer one.
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fPIC -DNO_GBM -DDEFAULT_ES=3 -fvisibility=hidden -fno-stack-protector")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-stack-protector")
+# ZOMDROID CANARY: the protector is deliberately ON to make the known shaderconv
+# stack smash abort AT the guilty function (tombstone names it) instead of silently
+# corrupting the process (suspected cause of the Mali/MediaTek death at Bullet.init).
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fPIC -DNO_GBM -DDEFAULT_ES=3 -fvisibility=hidden -fstack-protector-strong")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fstack-protector-strong")
 
 if(ANDROID)
         set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DNOX11")

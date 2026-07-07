@@ -1,4 +1,7 @@
 #include <stdio.h>
+#if defined(ANDROID) || defined(__ANDROID__)
+#include <sys/system_properties.h>
+#endif
 #ifndef _WIN32
 #include <unistd.h>
 #include <errno.h>
@@ -266,6 +269,54 @@ void initialize_gl4es() {
     default:
         // automatic GL version selection
         globals4es.gl = (globals4es.es == 1) ? 15 : 31;
+        // ZOMDROID (Mali guise, CONSTRUCTOR-TIME): the exposed-GL choice must be made
+        // HERE, not at the first glGetString — env LIBGL_GL=21 worked on the Mali
+        // tester while the same value applied lazily did NOT (early consumers of
+        // globals4es.gl had already latched 3.1-mode paths). Detection is pure
+        // props/cpuinfo — needs no GL context (GL_RENDERER is "<unknown>" in this
+        // stack anyway). Positive Qualcomm ID keeps 3.1; everything else gets the
+        // field-proven 2.1. Explicit LIBGL_GL (cases above) always wins.
+#if defined(ANDROID) || defined(__ANDROID__)
+        if (globals4es.gl == 31) {
+            int zqcom = 0;
+            char zwhy[192] = {0};
+            static const char* zprops[] = {"ro.hardware.egl", "ro.hardware", "ro.soc.manufacturer",
+                                           "ro.board.platform"};
+            for (unsigned zi = 0; zi < sizeof(zprops) / sizeof(zprops[0]) && !zqcom; zi++) {
+                char zval[PROP_VALUE_MAX] = {0};
+                if (__system_property_get(zprops[zi], zval) <= 0) continue;
+                for (char* zc = zval; *zc; zc++)
+                    if (*zc >= 'A' && *zc <= 'Z') *zc += 32;
+                if (strstr(zval, "adreno") || strstr(zval, "qcom") || strstr(zval, "qualcomm") ||
+                    strstr(zval, "snapdragon") || strstr(zval, "qti")) {
+                    zqcom = 1;
+                    snprintf(zwhy, sizeof(zwhy), "%s=%s", zprops[zi], zval);
+                }
+            }
+            if (!zqcom) {
+                FILE* zf = fopen("/proc/cpuinfo", "r");
+                if (zf) {
+                    char zline[256];
+                    while (fgets(zline, sizeof(zline), zf)) {
+                        for (char* zc = zline; *zc; zc++)
+                            if (*zc >= 'A' && *zc <= 'Z') *zc += 32;
+                        if (strstr(zline, "qualcomm") || strstr(zline, "snapdragon")) {
+                            zqcom = 1;
+                            snprintf(zwhy, sizeof(zwhy), "cpuinfo");
+                            break;
+                        }
+                    }
+                    fclose(zf);
+                }
+            }
+            if (zqcom) {
+                SHUT_LOGD("ZOMDROID: Qualcomm detected (%s) -> keeping GL %d", zwhy, globals4es.gl);
+            } else {
+                SHUT_LOGD("ZOMDROID: non-Qualcomm GPU -> GL 2.1 guise from init (was %d)", globals4es.gl);
+                globals4es.gl = 21;
+            }
+        }
+#endif
         break;
     }
 
@@ -834,8 +885,12 @@ void initialize_gl4es() {
     // verify WHICH renderer actually loaded (Zomdroid resets the choice on new instances).
     {
         extern void zomdroid_gltrace(const char* fmt, ...);
-        zomdroid_gltrace("INIT ng_gl4es RC2-DIAG-MALI (breadcrumbs: CONVERT-COMPILE-LINK), noerror=%d",
+        zomdroid_gltrace("INIT ng_gl4es RC14-PLAY (guise moved to constructor = true LIBGL_GL=21 equivalent), noerror=%d",
                          globals4es.noerror);
+        {
+            extern void zomdroid_exit_probe_register(void);
+            zomdroid_exit_probe_register();
+        }
     }
 }
 

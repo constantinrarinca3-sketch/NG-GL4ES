@@ -1,3 +1,4 @@
+#include "logs.h"
 #include "texture.h"
 
 #include "../glx/hardext.h"

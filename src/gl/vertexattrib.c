@@ -1,3 +1,4 @@
+#include "logs.h"
 #include <GL/gl.h>
 #include "vertexattrib.h"
 

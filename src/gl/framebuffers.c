@@ -1,3 +1,4 @@
+#include "logs.h"
 #include "framebuffers.h"
  
 #if !defined(ANDROID) && !defined(AMIGAOS4) && !defined(__EMSCRIPTEN__) && !defined(__APPLE__)

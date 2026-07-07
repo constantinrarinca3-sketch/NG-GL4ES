@@ -201,6 +201,8 @@ static char* zomdroid_floatify_builtin_args(char* src) {
     for (size_t i = 0; i < slen; i++) {
         if (!mark[i] || !isdigit((unsigned char)src[i])) continue;
         if (i > 0 && (isalnum((unsigned char)src[i - 1]) || src[i - 1] == '_' || src[i - 1] == '.')) continue;
+        // ZOMDROID FIX (Opus): exponent digits ("1.0e-10") are part of a FLOAT literal
+        if (i >= 2 && (src[i - 1] == '-' || src[i - 1] == '+') && (src[i - 2] == 'e' || src[i - 2] == 'E')) continue;
         size_t j = i;
         while (j < slen && isdigit((unsigned char)src[j]))
             j++;
@@ -234,7 +236,8 @@ static char* zomdroid_floatify_builtin_args(char* src) {
     char* o = out;
     for (size_t i = 0; i < slen;) {
         if (mark[i] && isdigit((unsigned char)src[i]) &&
-            !(i > 0 && (isalnum((unsigned char)src[i - 1]) || src[i - 1] == '_' || src[i - 1] == '.'))) {
+            !(i > 0 && (isalnum((unsigned char)src[i - 1]) || src[i - 1] == '_' || src[i - 1] == '.')) &&
+            !(i >= 2 && (src[i - 1] == '-' || src[i - 1] == '+') && (src[i - 2] == 'e' || src[i - 2] == 'E'))) {
             size_t j = i;
             while (j < slen && isdigit((unsigned char)src[j]))
                 j++;
@@ -259,6 +262,345 @@ static char* zomdroid_floatify_builtin_args(char* src) {
     }
     *o = '\0';
     free(mark);
+    free(src);
+    return out;
+}
+
+// ZOMDROID FIX (Mali strictness, wave 2): Mali rejects EVERY implicit int<->float mix
+// and ignores GL_EXT_shader_implicit_conversions (reported "not supported"). The RC2
+// passes covered const-float initializers and builtin args; the 28 shaders failing on
+// the Mali tester used two more shapes: mixed ARITHMETIC/COMPARISONS with float locals
+// ("(clip*2)-1", "if (d > 0)", "1 - pow(...)") and a sampler named "texture" (a builtin
+// function name in GLSL 3.x -> "Symbol 'texture' redeclared").
+
+#define ZFLT_MAX_IDS 256
+#define ZFLT_ID_LEN 64
+
+// Collect identifiers declared float in this source ("float x", "uniform float x",
+// "const highp float x, y;"). Function names ("float foo(") are skipped.
+static int zomdroid_collect_float_ids(const char* src, char ids[ZFLT_MAX_IDS][ZFLT_ID_LEN]) {
+    int n = 0;
+    for (const char* p = src; (p = strstr(p, "float")) != NULL; p += 5) {
+        if ((p > src && (isalnum((unsigned char)p[-1]) || p[-1] == '_')) ||
+            isalnum((unsigned char)p[5]) || p[5] == '_')
+            continue;
+        const char* q = p + 5;
+        for (;;) {
+            while (*q == ' ' || *q == '\t') q++;
+            if (!(isalpha((unsigned char)*q) || *q == '_')) break;
+            const char* s = q;
+            while (isalnum((unsigned char)*q) || *q == '_') q++;
+            size_t len = (size_t)(q - s);
+            const char* r = q;
+            while (*r == ' ' || *r == '\t') r++;
+            if (*r == '(') break; // function declaration, not a variable
+            if (len < ZFLT_ID_LEN && n < ZFLT_MAX_IDS) {
+                memcpy(ids[n], s, len);
+                ids[n][len] = '\0';
+                n++;
+            }
+            // multi-declarations: "float a, b = 0, c;"
+            while (*r && *r != ',' && *r != ';' && *r != ')' && *r != '\n') r++;
+            if (*r != ',') break;
+            q = r + 1;
+        }
+    }
+    return n;
+}
+
+// Collect object-like macros with a bare integer body ("#define BLUR_RANGE 2"). Their
+// uses inside float arithmetic trip Mali exactly like literal ints do, but the define
+// itself must stay integer (loop bounds / array sizes) — so uses get float()-wrapped.
+static int zomdroid_collect_int_macros(const char* src, char ids[ZFLT_MAX_IDS][ZFLT_ID_LEN]) {
+    int n = 0;
+    for (const char* p = src; (p = strstr(p, "#define")) != NULL; p += 7) {
+        const char* q = p + 7;
+        while (*q == ' ' || *q == '\t') q++;
+        const char* s = q;
+        while (isalnum((unsigned char)*q) || *q == '_') q++;
+        size_t len = (size_t)(q - s);
+        if (!len || len >= ZFLT_ID_LEN) continue;
+        if (*q == '(') continue; // function-like macro
+        while (*q == ' ' || *q == '\t') q++;
+        const char* v = q;
+        while (isdigit((unsigned char)*q)) q++;
+        if (q == v) continue; // body doesn't start with a number
+        while (*q == ' ' || *q == '\t' || *q == '\r') q++;
+        if (*q != '\n' && *q != '\0') continue; // body is an expression / float — skip
+        if (n < ZFLT_MAX_IDS) {
+            memcpy(ids[n], s, len);
+            ids[n][len] = '\0';
+            n++;
+        }
+    }
+    return n;
+}
+
+static int zomdroid_line_has_float_id(const char* line, size_t len, char ids[ZFLT_MAX_IDS][ZFLT_ID_LEN], int idn) {
+    for (int i = 0; i < idn; i++) {
+        size_t il = strlen(ids[i]);
+        if (il == 0 || il > len) continue;
+        for (const char* p = line; (p = strstr(p, ids[i])) != NULL && p < line + len; p += il) {
+            if (p >= line + len) break;
+            if ((p > line && (isalnum((unsigned char)p[-1]) || p[-1] == '_' || p[-1] == '.')) ||
+                (isalnum((unsigned char)p[il]) || p[il] == '_'))
+                continue;
+            return 1;
+        }
+    }
+    // vector component access (.a/.rgb/.xyz...) is float-typed in every PZ shader
+    for (const char* p = line; p < line + len - 1; p++) {
+        if (*p != '.') continue;
+        if (p == line || !(isalnum((unsigned char)p[-1]) || p[-1] == '_' || p[-1] == ')')) continue;
+        const char* q = p + 1;
+        while (q < line + len && strchr("rgbaxyzwstpq", *q)) q++;
+        if (q > p + 1 && (q >= line + len || !(isalnum((unsigned char)*q) || *q == '_' || *q == '.')))
+            return 1;
+    }
+    return 0;
+}
+
+// Floatify bare int literals on lines that visibly work with float data.
+// Guards: 'for(' headers, 'int'/'ivec'/'uvec' declarations, bit/mod operators,
+// preprocessor lines, [] indexing, '//' comments.
+static char* zomdroid_floatify_float_context_lines(char* src) {
+    if (!src) return src;
+    char(*ids)[ZFLT_ID_LEN] = (char(*)[ZFLT_ID_LEN])malloc(ZFLT_MAX_IDS * ZFLT_ID_LEN);
+    char(*macs)[ZFLT_ID_LEN] = (char(*)[ZFLT_ID_LEN])malloc(ZFLT_MAX_IDS * ZFLT_ID_LEN);
+    if (!ids || !macs) {
+        free(ids);
+        free(macs);
+        return src;
+    }
+    int idn = zomdroid_collect_float_ids(src, ids);
+    int macn = zomdroid_collect_int_macros(src, macs);
+    size_t slen = strlen(src);
+    char* out = (char*)malloc(slen * 3 + 64);
+    if (!out) {
+        free(ids);
+        free(macs);
+        return src;
+    }
+    char* o = out;
+    const char* p = src;
+    while (*p) {
+        const char* nl = strchr(p, '\n');
+        size_t len = nl ? (size_t)(nl - p) + 1 : strlen(p);
+        int touch = 1;
+        if (memchr(p, '#', len) || strncmp(p + strspn(p, " \t"), "for", 3) == 0)
+            touch = 0;
+        if (touch) {
+            static const char* bad[] = {"int ", "int\t", "ivec", "uvec", "<<", ">>", " % ", " & ", " | "};
+            for (unsigned b = 0; touch && b < sizeof(bad) / sizeof(bad[0]); b++) {
+                const char* f = p;
+                while ((f = strstr(f, bad[b])) != NULL && f < p + len) {
+                    touch = 0;
+                    break;
+                }
+            }
+        }
+        if (touch && !zomdroid_line_has_float_id(p, len, ids, idn))
+            touch = 0;
+        if (!touch) {
+            memcpy(o, p, len);
+            o += len;
+            p += len;
+            continue;
+        }
+        int bracket = 0, comment = 0;
+        for (size_t i = 0; i < len;) {
+            char c = p[i];
+            if (!comment && c == '/' && i + 1 < len && p[i + 1] == '/') comment = 1;
+            if (c == '[') bracket++;
+            else if (c == ']' && bracket > 0) bracket--;
+            // int-valued macro used in float context -> float(NAME) (definition untouched)
+            if (!comment && !bracket && (isalpha((unsigned char)c) || c == '_') &&
+                !(i > 0 && (isalnum((unsigned char)p[i - 1]) || p[i - 1] == '_' || p[i - 1] == '.'))) {
+                size_t j = i;
+                while (j < len && (isalnum((unsigned char)p[j]) || p[j] == '_'))
+                    j++;
+                size_t il = j - i;
+                // builtins with MANDATORY int args: copy the whole call verbatim so the
+                // LOD/coords never get floatified ("textureSize(tex, 0)" stays int).
+                if ((il == 11 && !strncmp(p + i, "textureSize", 11)) ||
+                    (il == 10 && !strncmp(p + i, "texelFetch", 10))) {
+                    size_t k = j;
+                    while (k < len && (p[k] == ' ' || p[k] == '\t')) k++;
+                    if (k < len && p[k] == '(') {
+                        int d2 = 0;
+                        size_t e2 = k;
+                        while (e2 < len) {
+                            if (p[e2] == '(') d2++;
+                            else if (p[e2] == ')') {
+                                d2--;
+                                if (!d2) break;
+                            }
+                            e2++;
+                        }
+                        if (e2 < len) {
+                            memcpy(o, p + i, e2 - i + 1);
+                            o += e2 - i + 1;
+                            i = e2 + 1;
+                            continue;
+                        }
+                    }
+                }
+                int mi = -1;
+                if (macn)
+                    for (int m = 0; m < macn; m++)
+                        if (strlen(macs[m]) == il && !strncmp(p + i, macs[m], il)) {
+                            mi = m;
+                            break;
+                        }
+                if (mi >= 0) {
+                    memcpy(o, "float(", 6);
+                    o += 6;
+                    memcpy(o, p + i, il);
+                    o += il;
+                    *o++ = ')';
+                    i = j;
+                    continue;
+                }
+                memcpy(o, p + i, il);
+                o += il;
+                i = j;
+                continue;
+            }
+            if (!comment && !bracket && isdigit((unsigned char)c) &&
+                !(i > 0 && (isalnum((unsigned char)p[i - 1]) || p[i - 1] == '_' || p[i - 1] == '.')) &&
+                !(i >= 2 && (p[i - 1] == '-' || p[i - 1] == '+') && (p[i - 2] == 'e' || p[i - 2] == 'E'))) {
+                size_t j = i;
+                while (j < len && isdigit((unsigned char)p[j]))
+                    j++;
+                int isint = !(j < len && (p[j] == '.' || p[j] == 'x' || p[j] == 'X' || p[j] == 'e' || p[j] == 'E' ||
+                                          p[j] == 'u' || p[j] == 'U' || isalpha((unsigned char)p[j]) || p[j] == '_'));
+                memcpy(o, p + i, j - i);
+                o += j - i;
+                if (isint) {
+                    *o++ = '.';
+                    *o++ = '0';
+                }
+                i = j;
+                continue;
+            }
+            *o++ = c;
+            i++;
+        }
+        p += len;
+    }
+    *o = '\0';
+    free(ids);
+    free(macs);
+    free(src);
+    return out;
+}
+
+// ZOMDROID FIX (Mali wave 3): textureSize() returns ivec2; PZ's visibility shader does
+// "texSize / textureSize(tex, 0)" — vec2/ivec2 arithmetic that Mali rejects. Wrap the
+// WHOLE call in vec2() when it is an operand of +-*/ (the int LOD argument inside must
+// stay int); lines mentioning ivec keep integer semantics and are left alone.
+static char* zomdroid_wrap_texturesize_arith(char* src) {
+    if (!src) return src;
+    int n = 0;
+    for (const char* p = src; (p = strstr(p, "textureSize")) != NULL; p += 11)
+        n++;
+    if (!n) return src;
+    char* out = (char*)malloc(strlen(src) + n * 8 + 1);
+    if (!out) return src;
+    const char* in = src;
+    char* o = out;
+    while (*in) {
+        if (*in == 't' && !strncmp(in, "textureSize", 11) &&
+            !(in > src && (isalnum((unsigned char)in[-1]) || in[-1] == '_' || in[-1] == '.')) &&
+            !(isalnum((unsigned char)in[11]) || in[11] == '_')) {
+            const char* q = in + 11;
+            while (*q == ' ' || *q == '\t') q++;
+            if (*q == '(') {
+                // full call span
+                int depth = 0;
+                const char* e = q;
+                while (*e) {
+                    if (*e == '(') depth++;
+                    else if (*e == ')') {
+                        depth--;
+                        if (!depth) break;
+                    }
+                    e++;
+                }
+                if (*e == ')') {
+                    // line must not carry ivec semantics
+                    const char* ls = in;
+                    while (ls > src && ls[-1] != '\n') ls--;
+                    const char* le = e;
+                    while (*le && *le != '\n') le++;
+                    int has_ivec = 0;
+                    for (const char* f = ls; f < le - 3; f++)
+                        if (!strncmp(f, "ivec", 4)) {
+                            has_ivec = 1;
+                            break;
+                        }
+                    // arithmetic operand: op right before the token or right after ')'
+                    const char* b = in;
+                    while (b > ls && (b[-1] == ' ' || b[-1] == '\t')) b--;
+                    const char* a = e + 1;
+                    while (*a == ' ' || *a == '\t') a++;
+                    int arith = (b > ls && (b[-1] == '+' || b[-1] == '-' || b[-1] == '*' || b[-1] == '/')) ||
+                                (*a == '+' || *a == '-' || *a == '*' || *a == '/');
+                    if (!has_ivec && arith) {
+                        memcpy(o, "vec2(", 5);
+                        o += 5;
+                        memcpy(o, in, (size_t)(e - in) + 1);
+                        o += e - in + 1;
+                        *o++ = ')';
+                        in = e + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        *o++ = *in++;
+    }
+    *o = '\0';
+    free(src);
+    return out;
+}
+
+// Rename a sampler declared with the reserved-in-GLSL3 name "texture" (declaration and
+// argument uses; calls like "texture2D(" / converted "texture(" keep their name).
+static char* zomdroid_rename_reserved_samplers(char* src) {
+    if (!src) return src;
+    if (!strstr(src, "sampler2D texture")) return src;
+    int hits = 0;
+    for (const char* p = src; (p = strstr(p, "texture")) != NULL; p += 7) {
+        if ((p > src && (isalnum((unsigned char)p[-1]) || p[-1] == '_' || p[-1] == '.')) ||
+            isalnum((unsigned char)p[7]) || p[7] == '_')
+            continue;
+        const char* q = p + 7;
+        while (*q == ' ' || *q == '\t') q++;
+        if (*q == '(') continue;
+        hits++;
+    }
+    if (!hits) return src;
+    char* out = (char*)malloc(strlen(src) + hits * 8 + 1);
+    if (!out) return src;
+    const char* in = src;
+    char* o = out;
+    while (*in) {
+        if (*in == 't' && !strncmp(in, "texture", 7) &&
+            !(in > src && (isalnum((unsigned char)in[-1]) || in[-1] == '_' || in[-1] == '.')) &&
+            !(isalnum((unsigned char)in[7]) || in[7] == '_')) {
+            const char* q = in + 7;
+            while (*q == ' ' || *q == '\t') q++;
+            if (*q != '(') {
+                memcpy(o, "zsmp_texture", 12);
+                o += 12;
+                in += 7;
+                continue;
+            }
+        }
+        *o++ = *in++;
+    }
+    *o = '\0';
     free(src);
     return out;
 }
@@ -550,7 +892,7 @@ void APIENTRY_GL4ES gl4es_glCompileShader(GLuint shader) {
             LOAD_GLES2(glGetShaderInfoLog);
             GLint status = 0;
             gles_glGetShaderiv(glshader->id, GL_COMPILE_STATUS, &status);
-            SHUT_LOGD("ZOMDROID_DBG: glCompileShader id=%d status=%d\n", glshader->id, status);
+            ZOMDROID_VDBG("ZOMDROID_DBG: glCompileShader id=%d status=%d\n", glshader->id, status);
             {
                 extern void zomdroid_gltrace(const char* fmt, ...);
                 zomdroid_gltrace("COMPILE shader=%u native=%u status=%d", shader, glshader->id, status);
@@ -1211,6 +1553,19 @@ void APIENTRY_GL4ES gl4es_glShaderSource(GLuint shader, GLsizei count, const GLc
     }
 
     CHECK_SHADER(void, shader)
+    // ZOMDROID FIX: new source = new uniform table. The count was never reset, so every
+    // recompile of the same shader object appended duplicate entries; past 1024 entries
+    // process_uniform_declarations wrote beyond the array (silent heap smash).
+    {
+        int zmax = glshader->uniforms_declarations_count;
+        if (zmax > MAX_UNIFORM_VARIABLE_NUMBER) zmax = MAX_UNIFORM_VARIABLE_NUMBER;
+        for (int zi = 0; zi < zmax; zi++) {
+            glshader->uniforms_declarations[zi].variable[0] = '\0';
+            glshader->uniforms_declarations[zi].type[0] = '\0';
+            glshader->uniforms_declarations[zi].initial_value[0] = '\0';
+        }
+        glshader->uniforms_declarations_count = 0;
+    }
     // get the size of the shader sources and than concatenate in a single string
     int l = 0;
     for (int i = 0; i < count; i++)
@@ -1234,7 +1589,7 @@ void APIENTRY_GL4ES gl4es_glShaderSource(GLuint shader, GLsizei count, const GLc
         int isFPEShader = (strstr(glshader->source, fpeshader_signature) != NULL) ? 1 : 0;
         // adapt shader if needed (i.e. not an es2 context and shader is not #version 100)
         if (is_direct_shader(glshader->source)) {
-            SHUT_LOGD("ZOMDROID_DBG: shader=%d path=DIRECT\n", shader);
+            ZOMDROID_VDBG("ZOMDROID_DBG: shader=%d path=DIRECT\n", shader);
             glshader->converted = strdup(glshader->source);
         } else if (globals4es.simple_shaderconv && !isFPEShader) {
             // ZOMDROID DIAG (Mali field debugging): breadcrumb before conversion — a crash
@@ -1244,7 +1599,7 @@ void APIENTRY_GL4ES gl4es_glShaderSource(GLuint shader, GLsizei count, const GLc
                 zomdroid_gltrace("CONVERT begin shader=%u type=0x%X len=%d", shader, glshader->type,
                                  glshader->source ? (int)strlen(glshader->source) : -1);
             }
-            SHUT_LOGD("ZOMDROID_DBG: shader=%d path=SIMPLE_SHADERCONV\n", shader);glshader->converted = strip_uniform_initializers(glshader->converted);
+            ZOMDROID_VDBG("ZOMDROID_DBG: shader=%d path=SIMPLE_SHADERCONV\n", shader);glshader->converted = strip_uniform_initializers(glshader->converted);
             // ZOMDROID FIX (invisible character): strip PZ's redefinitions of GLSL
             // builtins (max/min/clamp) — GLES3 link fails on them.
             zomdroid_strip_builtin_redefs(glshader->source);
@@ -1252,6 +1607,11 @@ void APIENTRY_GL4ES gl4es_glShaderSource(GLuint shader, GLsizei count, const GLc
             // legalize const-float int initializers and int literals in builtin calls.
             glshader->source = zomdroid_floatify_const_float(glshader->source);
             glshader->source = zomdroid_floatify_builtin_args(glshader->source);
+            // ZOMDROID FIX (Mali wave 2): mixed arithmetic/comparisons with float locals
+            // and the reserved sampler name "texture" (see pass definitions above).
+            glshader->source = zomdroid_floatify_float_context_lines(glshader->source);
+            glshader->source = zomdroid_rename_reserved_samplers(glshader->source);
+            glshader->source = zomdroid_wrap_texturesize_arith(glshader->source);
             // ZOMDROID FIX (white-world root, final link): the SIMPLE path (the one PZ
             // actually uses) stripped GLSL uniform initializers WITHOUT recording them,
             // so set_uniforms_default_value never had anything to restore (zero DEFAULT
@@ -1422,7 +1782,7 @@ void APIENTRY_GL4ES gl4es_glShaderSource(GLuint shader, GLsizei count, const GLc
             }
         }
         const GLchar* sources[] = {finalSource};
-        SHUT_LOGD("ZOMDROID_DBG: shader=%d type=%d final source:\n%s\n", shader, glshader->type, finalSource);
+        ZOMDROID_VDBG("ZOMDROID_DBG: shader=%d type=%d final source:\n%s\n", shader, glshader->type, finalSource);
         gles_glShaderSource(shader, 1, sources, NULL);
         if (tempSource) free(tempSource);
 
