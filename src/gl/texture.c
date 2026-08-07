@@ -2003,6 +2003,52 @@ void APIENTRY_GL4ES gl4es_glTexSubImage2D(GLenum target, GLint level, GLint xoff
         pixels_src = (const GLubyte*)temp_pixels;
     }
 
+    // ZOMDROID SHRINK FIX (black patches under LIBGL_SHRINK, 2026-08-07): this
+    // rewritten TexSubImage never learned about shrunk textures — patches were sent
+    // with FULL-SIZE coordinates into a HALF-SIZE texture, the driver rejected them
+    // (silently under noerror), and every partially-painted object (vehicle skins,
+    // farming plots) stayed black for anyone running the community LIBGL_SHRINK=1
+    // advice. Scale offsets/dimensions by the texture's shrink factor and downscale
+    // the pixels to match.
+    GLvoid* zshrunk = NULL;
+    {
+        gltexture_t* zsb = glstate->texture.bound[glstate->texture.active][what_target(target)];
+        int zf = 0;
+        if (zsb) {
+            if (zsb->shrink > 0) zf = zsb->shrink;
+            else if (zsb->useratio) {
+                if (zsb->ratiox <= 0.26f) zf = 2;
+                else if (zsb->ratiox <= 0.51f) zf = 1;
+            }
+        }
+        if (zf > 0 && type == GL_UNSIGNED_BYTE &&
+            (format == GL_RGBA || format == GL_RGB || format == GL_BGRA || format == GL_LUMINANCE)) {
+            GLvoid* zcur = (GLvoid*)pixels_src;
+            int zw = width, zh = height;
+            for (int zi = 0; zi < zf && zw > 1 && zh > 1; zi++) {
+                GLvoid* zout = zcur;
+                if (!pixel_halfscale(zcur, &zout, zw, zh, format, type)) break;
+                if (zcur != (GLvoid*)pixels_src && zcur != zout) free(zcur);
+                zcur = zout;
+                zw = (zw + 1) / 2;
+                zh = (zh + 1) / 2;
+            }
+            if (zcur != (GLvoid*)pixels_src) {
+                zshrunk = zcur;
+                pixels_src = (const GLubyte*)zcur;
+                xoffset >>= zf;
+                yoffset >>= zf;
+                width = zw;
+                height = zh;
+                static int zshr_logged = 0;
+                if (zshr_logged < 3) {
+                    zshr_logged++;
+                    zomdroid_gltrace("SHRINK sub-upload rescaled to %dx%d at %d,%d (factor %d)", width, height,
+                                     xoffset, yoffset, zf);
+                }
+            }
+        }
+    }
     // ZOMDROID T16 (black-vehicles fix): if this texture is stored in one of our 16-bit
     // formats, the sub-upload has to speak the same format or the driver drops it. PZ
     // builds vehicle skins exactly this way — empty 16-bit atlas, then RGBA8 patches.
@@ -2030,6 +2076,7 @@ void APIENTRY_GL4ES gl4es_glTexSubImage2D(GLenum target, GLint level, GLint xoff
     gles_glTexSubImage2D(target, level, xoffset, yoffset, width, height, format, type, (const GLvoid*)pixels_src);
 
     if (zconv) free(zconv);
+    if (zshrunk) free(zshrunk);
     if (temp_pixels) free(temp_pixels);
 }
 

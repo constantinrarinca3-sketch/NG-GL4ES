@@ -566,6 +566,21 @@ GLboolean APIENTRY_GL4ES gl4es_glUnmapBuffer(GLenum target) {
     }
     noerrorShim();
 
+    // ZOMDROID NATIVE MAP: the pointer came from the driver — unmap natively and
+    // skip both SubData re-uploads below (the shadow was never written).
+    if (buff->native_mapped) {
+        LOAD_GLES3(glUnmapBuffer);
+        GLboolean znr = GL_TRUE;
+        if (gles_glUnmapBuffer) {
+            bindBuffer(buff->type, buff->real_buffer);
+            znr = gles_glUnmapBuffer(buff->type);
+        }
+        buff->native_mapped = 0;
+        buff->mapped = 0;
+        buff->ranged = 0;
+        return znr;
+    }
+
     if (buff->real_buffer &&
         (target == GL_ARRAY_BUFFER || target == GL_ELEMENT_ARRAY_BUFFER || target == GL_UNIFORM_BUFFER ||
          target == GL_COPY_WRITE_BUFFER || target == GL_COPY_READ_BUFFER || target == GL_TEXTURE_BUFFER ||
@@ -769,9 +784,54 @@ void* APIENTRY_GL4ES gl4es_glMapBufferRange(GLenum target, GLintptr offset, GLsi
             if ((size_t)buff->size < zneed) buff->size = (GLsizeiptr)zneed;
         }
     }
+    // ZOMDROID NATIVE MAP (map/rain/driving FPS, 2026-08-07): on an ES3 context the
+    // driver maps the buffer itself — the app writes ONCE into driver memory instead
+    // of writing our shadow and paying a second full copy at unmap (the minimap
+    // complaint measured 13.5 GB of buffer churn in one stretch; rain streams the
+    // same way every frame). The driver also finally SEES the UNSYNCHRONIZED /
+    // INVALIDATE bits PZ passes, which the shadow path had to ignore.
+    // Deliberately narrow: WRITE-only (no READ) maps of GL_ARRAY_BUFFER with a real
+    // driver buffer. Element buffers stay on the shadow path — index data is read
+    // back by the emulated draw paths. The shadow keeps the PRE-map content; PZ
+    // never reads these buffers back (that is why the fake mapping worked at all).
+    // LIBGL_NATIVEMAP=0 disables.
+    {
+        static int znm = -1;
+        if (znm < 0) {
+            const char* ze = getenv("LIBGL_NATIVEMAP");
+            znm = ze ? atoi(ze) : 1;
+        }
+        if (znm && target == GL_ARRAY_BUFFER && buff->real_buffer && globals4es.esversion >= 300 &&
+            (access & GL_MAP_WRITE_BIT_EXT) && !(access & GL_MAP_READ_BIT_EXT)) {
+            LOAD_GLES3(glMapBufferRange);
+            if (gles_glMapBufferRange) {
+                bindBuffer(target, buff->real_buffer);
+                void* znp = gles_glMapBufferRange(target, offset, length, access);
+                if (znp) {
+                    buff->access = access;
+                    buff->mapped = 1;
+                    buff->ranged = 1;
+                    buff->native_mapped = 1;
+                    buff->offset = offset;
+                    buff->length = length;
+                    static int znlog = 0;
+                    if (znlog < 3) {
+                        znlog++;
+                        extern void zomdroid_gltrace(const char* fmt, ...);
+                        zomdroid_gltrace("NATIVEMAP buf=%u off=%ld len=%ld access=0x%x", buff->buffer, (long)offset,
+                                         (long)length, access);
+                    }
+                    noerrorShim();
+                    return znp;
+                }
+                // driver refused (context/flags) — fall through to the shadow path
+            }
+        }
+    }
     buff->access = access;
     buff->mapped = 1;
     buff->ranged = 1;
+    buff->native_mapped = 0;
     buff->offset = offset;
     buff->length = length;
     noerrorShim();
@@ -795,6 +855,17 @@ void APIENTRY_GL4ES gl4es_glFlushMappedBufferRange(GLenum target, GLintptr offse
     }
     if (!buff->mapped || !buff->ranged || !(buff->access & GL_MAP_FLUSH_EXPLICIT_BIT_EXT)) {
         errorShim(GL_INVALID_OPERATION);
+        return;
+    }
+
+    // ZOMDROID NATIVE MAP: flush through the driver, nothing to copy ourselves
+    if (buff->native_mapped) {
+        LOAD_GLES3(glFlushMappedBufferRange);
+        if (gles_glFlushMappedBufferRange) {
+            bindBuffer(buff->type, buff->real_buffer);
+            gles_glFlushMappedBufferRange(buff->type, offset, length);
+        }
+        noerrorShim();
         return;
     }
 

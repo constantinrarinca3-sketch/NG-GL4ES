@@ -916,7 +916,7 @@ void initialize_gl4es() {
     // verify WHICH renderer actually loaded (Zomdroid resets the choice on new instances).
     {
         extern void zomdroid_gltrace(const char* fmt, ...);
-        zomdroid_gltrace("INIT ng_gl4es RC35-PLAY (hoist only without driver ext; multi-line hoist; T16 restored), noerror=%d",
+        zomdroid_gltrace("INIT ng_gl4es RC36-PLAY (native buffer mapping ES3 + shrink-aware sub-uploads), noerror=%d",
                          globals4es.noerror);
         {
             extern void zomdroid_exit_probe_register(void);

@@ -15,6 +15,9 @@ typedef struct {
     GLint access;
     int mapped;
     int ranged;
+    // ZOMDROID NATIVE MAP: this mapping is a real driver pointer, not the shadow;
+    // unmap/flush must go native and skip the SubData re-upload
+    int native_mapped;
     GLintptr offset;
     GLsizeiptr length;
     GLvoid* data;
