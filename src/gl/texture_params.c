@@ -474,6 +474,11 @@ void APIENTRY_GL4ES gl4es_glDeleteTextures(GLsizei n, const GLuint* textures) {
             k = kh_get(tex, list, t);
             if (k != kh_end(list)) {
                 tex = kh_value(list, k);
+                // ZOMDROID GLALLOC
+                {
+                    extern void zomdroid_glalloc_del(int cat, unsigned id);
+                    zomdroid_glalloc_del(0, t);
+                }
                 int a;
                 for (a = 0; a < MAX_TEX; a++) {
                     int found = 0;

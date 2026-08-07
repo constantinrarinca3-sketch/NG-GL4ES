@@ -1013,6 +1013,12 @@ void APIENTRY_GL4ES gl4es_glDeleteRenderbuffers(GLsizei n, GLuint* renderbuffers
 
     errorGL();
     gles_glDeleteRenderbuffers(n, renderbuffers);
+    // ZOMDROID GLALLOC
+    {
+        extern void zomdroid_glalloc_del(int cat, unsigned id);
+        for (int zi = 0; zi < n; zi++)
+            if (renderbuffers[zi]) zomdroid_glalloc_del(2, renderbuffers[zi]);
+    }
 }
 
 void APIENTRY_GL4ES gl4es_glRenderbufferStorage(GLenum target, GLenum internalformat, GLsizei width, GLsizei height) {
@@ -1031,6 +1037,11 @@ void APIENTRY_GL4ES gl4es_glRenderbufferStorage(GLenum target, GLenum internalfo
     errorGL();
     width = (hardext.npot > 0 && !globals4es.potframebuffer) ? width : npot(width);
     height = (hardext.npot > 0 && !globals4es.potframebuffer) ? height : npot(height);
+    // ZOMDROID GLALLOC: renderbuffer storage request (approx 4 B/px)
+    {
+        extern void zomdroid_glalloc_set(int cat, unsigned id, long bytes);
+        zomdroid_glalloc_set(2, rend->renderbuffer, (long)width * height * 4);
+    }
     int use_secondarybuffer = 0;
     int use_secondarytexture = 0;
     GLenum format = internalformat;

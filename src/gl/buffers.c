@@ -1,5 +1,6 @@
 #include <GLES/gl3.h>
 #include "buffers.h"
+#include <time.h>
 
 #include "GLES3/gl32.h"
 #include "khash.h"
@@ -228,14 +229,19 @@ void APIENTRY_GL4ES gl4es_glBufferData(GLenum target, GLsizeiptr size, const GLv
         LOAD_GLES(glBindBuffer);
         bindBuffer(target, buff->real_buffer);
         gles_glBufferData(target, size, data, usage);
+        zomdroid_glalloc_set(1, buff->real_buffer, (long)size);
         DBG(SHUT_LOGD(" => real VBO %d\n", buff->real_buffer);)
     }
 
     if (buff->data && buff->size < size) {
+        zomdroid_shadow_sub(buff->size);
         free(buff->data);
         buff->data = NULL;
     }
-    if (!buff->data) buff->data = malloc(size);
+    if (!buff->data) {
+        buff->data = malloc(size);
+        zomdroid_shadow_add(size);
+    }
     buff->size = size;
     buff->usage = usage;
     DBG(SHUT_LOGD("\t buff->data = %p (size=%zd)\n", buff->data, size);)
@@ -261,6 +267,7 @@ void APIENTRY_GL4ES gl4es_glNamedBufferData(GLuint buffer, GLsizeiptr size, cons
         return;
     }
     if (buff->data) {
+        zomdroid_shadow_sub(buff->size);
         free(buff->data);
     }
     int go_real = 0;
@@ -286,11 +293,13 @@ void APIENTRY_GL4ES gl4es_glNamedBufferData(GLuint buffer, GLsizeiptr size, cons
         LOAD_GLES(glBindBuffer);
         bindBuffer(buff->type, buff->real_buffer);
         gles_glBufferData(buff->type, size, data, usage);
+        zomdroid_glalloc_set(1, buff->real_buffer, (long)size);
     }
 
     buff->size = size;
     buff->usage = usage;
     buff->data = malloc(size);
+    zomdroid_shadow_add(size);
     buff->access = GL_READ_WRITE;
     if (data) memcpy(buff->data, data, size);
     // update binded VA
@@ -399,7 +408,10 @@ void APIENTRY_GL4ES gl4es_glDeleteBuffers(GLsizei n, const GLuint* buffers) {
                             glstate->vao->vertexattrib[j].real_pointer = 0;
                         }
                     DBG(SHUT_LOGD("\t buff->data = %p\n", buff->data);)
-                    if (buff->data) free(buff->data);
+                    if (buff->data) {
+                        zomdroid_shadow_sub(buff->size);
+                        free(buff->data);
+                    }
                     kh_del(buff, list, k);
                     free(buff);
                 }
@@ -505,6 +517,7 @@ void* APIENTRY_GL4ES gl4es_glMapBuffer(GLenum target, GLenum access) {
             errorShim(GL_OUT_OF_MEMORY);
             return NULL;
         }
+        zomdroid_shadow_add(buff->size);
     }
     buff->access = access; // not used
     buff->mapped = 1;
@@ -561,7 +574,15 @@ GLboolean APIENTRY_GL4ES gl4es_glUnmapBuffer(GLenum target) {
         LOAD_GLES(glBufferSubData);
         LOAD_GLES(glBindBuffer);
         bindBuffer(buff->type, buff->real_buffer);
-        gles_glBufferSubData(buff->type, 0, buff->size, buff->data);
+        {
+            struct timespec zt0, zt1;
+            clock_gettime(CLOCK_MONOTONIC, &zt0);
+            gles_glBufferSubData(buff->type, 0, buff->size, buff->data);
+            clock_gettime(CLOCK_MONOTONIC, &zt1);
+            long zms = (zt1.tv_sec - zt0.tv_sec) * 1000 + (zt1.tv_nsec - zt0.tv_nsec) / 1000000;
+            extern void zomdroid_slowsub(const char*, long, long, unsigned);
+            if (zms >= 3) zomdroid_slowsub("unmap-full", zms, (long)buff->size, buff->buffer);
+        }
     }
 
     if (buff->real_buffer &&
@@ -572,7 +593,15 @@ GLboolean APIENTRY_GL4ES gl4es_glUnmapBuffer(GLenum target) {
         !(buff->access & GL_MAP_FLUSH_EXPLICIT_BIT_EXT)) {
         LOAD_GLES(glBufferSubData);
         bindBuffer(buff->type, buff->real_buffer);
-        gles_glBufferSubData(buff->type, buff->offset, buff->length, (void*)((uintptr_t)buff->data + buff->offset));
+        {
+            struct timespec zt0, zt1;
+            clock_gettime(CLOCK_MONOTONIC, &zt0);
+            gles_glBufferSubData(buff->type, buff->offset, buff->length, (void*)((uintptr_t)buff->data + buff->offset));
+            clock_gettime(CLOCK_MONOTONIC, &zt1);
+            long zms = (zt1.tv_sec - zt0.tv_sec) * 1000 + (zt1.tv_nsec - zt0.tv_nsec) / 1000000;
+            extern void zomdroid_slowsub(const char*, long, long, unsigned);
+            if (zms >= 3) zomdroid_slowsub("unmap-ranged", zms, (long)buff->length, buff->buffer);
+        }
     }
     if (buff->mapped) {
         buff->mapped = 0;
@@ -601,7 +630,15 @@ GLboolean APIENTRY_GL4ES gl4es_glUnmapNamedBuffer(GLuint buffer) {
         LOAD_GLES(glBufferSubData);
         LOAD_GLES(glBindBuffer);
         bindBuffer(buff->type, buff->real_buffer);
-        gles_glBufferSubData(buff->type, 0, buff->size, buff->data);
+        {
+            struct timespec zt0, zt1;
+            clock_gettime(CLOCK_MONOTONIC, &zt0);
+            gles_glBufferSubData(buff->type, 0, buff->size, buff->data);
+            clock_gettime(CLOCK_MONOTONIC, &zt1);
+            long zms = (zt1.tv_sec - zt0.tv_sec) * 1000 + (zt1.tv_nsec - zt0.tv_nsec) / 1000000;
+            extern void zomdroid_slowsub(const char*, long, long, unsigned);
+            if (zms >= 3) zomdroid_slowsub("unmap-full", zms, (long)buff->size, buff->buffer);
+        }
     }
 
     if (buff->real_buffer &&
@@ -613,7 +650,15 @@ GLboolean APIENTRY_GL4ES gl4es_glUnmapNamedBuffer(GLuint buffer) {
         LOAD_GLES(glBufferSubData);
         LOAD_GLES(glBindBuffer);
         bindBuffer(buff->type, buff->real_buffer);
-        gles_glBufferSubData(buff->type, buff->offset, buff->length, (void*)((uintptr_t)buff->data + buff->offset));
+        {
+            struct timespec zt0, zt1;
+            clock_gettime(CLOCK_MONOTONIC, &zt0);
+            gles_glBufferSubData(buff->type, buff->offset, buff->length, (void*)((uintptr_t)buff->data + buff->offset));
+            clock_gettime(CLOCK_MONOTONIC, &zt1);
+            long zms = (zt1.tv_sec - zt0.tv_sec) * 1000 + (zt1.tv_nsec - zt0.tv_nsec) / 1000000;
+            extern void zomdroid_slowsub(const char*, long, long, unsigned);
+            if (zms >= 3) zomdroid_slowsub("unmap-ranged", zms, (long)buff->length, buff->buffer);
+        }
     }
     if (buff->mapped) {
         buff->mapped = 0;
@@ -719,6 +764,7 @@ void* APIENTRY_GL4ES gl4es_glMapBufferRange(GLenum target, GLintptr offset, GLsi
             }
             size_t zold = buff->data ? (size_t)buff->size : 0;
             if (zneed > zold) memset((char*)znd + zold, 0, zneed - zold);
+            zomdroid_shadow_add((long)(zneed - zold));
             buff->data = znd;
             if ((size_t)buff->size < zneed) buff->size = (GLsizeiptr)zneed;
         }
@@ -860,6 +906,7 @@ void APIENTRY_GL4ES gl4es_glBindBufferRange(GLenum target, GLuint index, GLuint 
 
             LOAD_GLES(glBufferData);
             gles_glBufferData(target, buff->size, buff->data, buff->usage);
+            zomdroid_glalloc_set(1, buff->real_buffer, (long)buff->size);
 
         } else {
             LOAD_GLES(glGenBuffers);
@@ -1007,6 +1054,7 @@ void deleteSingleBuffer(GLuint buffer) {
     if (glstate->bind_buffer.pack == buffer) glstate->bind_buffer.pack = 0;
     if (glstate->bind_buffer.unpack == buffer) glstate->bind_buffer.unpack = 0;
     gles_glDeleteBuffers(1, &buffer);
+    zomdroid_glalloc_del(1, buffer);
 }
 
 void unboundBuffers() {

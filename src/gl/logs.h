@@ -13,6 +13,17 @@ void write_log(const char* format, ...);
 // ZOMDROID DIAG (Mali ES3-mine hunt): flight recorder + probes.
 void zomdroid_gltrace(const char* fmt, ...);
 void zomdroid_exit_probe_register(void);
+// MEMDIAG: buffer shadow-copy accounting (+RSS/Swap ground truth via /proc/self/status)
+void zomdroid_memstat_tag(const char* tag);
+void zomdroid_shadow_add(long n);
+void zomdroid_shadow_sub(long n);
+// GPU-ALLOC DIAG (GL mtrack explosion hunt): ledger of driver-side storage the app
+// requests through our entry points, keyed by app-visible object id.
+// cat: 0=texture 1=buffer 2=renderbuffer 3=stream-scratch (cumulative only)
+void zomdroid_glalloc_set(int cat, unsigned id, long bytes);
+void zomdroid_glalloc_del(int cat, unsigned id);
+void zomdroid_glalloc_cum(int cat, long bytes);
+long zomdroid_glalloc_live_tex(void);
 // One-shot usage probe for ES3-only entry points: logs the FIRST 3 calls per function
 // (then goes silent — zero flood). The last "GL3 use#" crumb before a silent death
 // names the poison candidate.

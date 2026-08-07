@@ -793,6 +793,7 @@ void ToBuffer(int first, int count) {
     glstate->scratch_vertex_size = stride*count;
     bindBuffer(GL_ARRAY_BUFFER, glstate->scratch_vertex);
     gles_glBufferData(GL_ARRAY_BUFFER, stride*count, (void*)(master+first*stride), GL_STREAM_DRAW);
+    zomdroid_glalloc_cum(3, (long)stride * count);
 #else
     LOAD_GLES(glBufferSubData);
     gl4es_scratch_vertex(total); // alloc if needed and bind scratch vertex buffer
@@ -1267,6 +1268,7 @@ void gl4es_scratch_vertex(int alloc) {
 #endif
         bindBuffer(GL_ARRAY_BUFFER, glstate->scratch_vertex);
         gles_glBufferData(GL_ARRAY_BUFFER, alloc, NULL, GL_STREAM_DRAW);
+        zomdroid_glalloc_cum(3, (long)alloc);
         glstate->scratch_vertex_size = alloc;
     } else
         bindBuffer(GL_ARRAY_BUFFER, glstate->scratch_vertex);
@@ -1285,6 +1287,7 @@ void gl4es_scratch_indices(int alloc) {
     bindBuffer(GL_ELEMENT_ARRAY_BUFFER, glstate->scratch_indices);
     if (glstate->scratch_indices_size < alloc) {
         gles_glBufferData(GL_ELEMENT_ARRAY_BUFFER, alloc, NULL, GL_DYNAMIC_DRAW);
+        zomdroid_glalloc_cum(3, (long)alloc);
         glstate->scratch_indices_size = alloc;
     }
 }
