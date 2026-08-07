@@ -243,6 +243,15 @@ void gl4es_glCompressedTexImage2D(GLenum target, GLint level, GLenum internalfor
         noerrorShim();
         return; // nothing to do...
     }
+    // ZOMDROID GLALLOC: compressed upload request (undercounts if gl4es decompresses)
+    {
+        extern void zomdroid_glalloc_set(int cat, unsigned id, long bytes);
+        extern void zomdroid_glalloc_cum(int cat, long bytes);
+        if (level == 0 && bound)
+            zomdroid_glalloc_set(0, bound->texture, (long)imageSize);
+        else
+            zomdroid_glalloc_cum(0, (long)imageSize);
+    }
 
     if(level && (globals4es.automipmap==3)) {
         noerrorShim();
@@ -279,6 +288,16 @@ void gl4es_glCompressedTexImage2D(GLenum target, GLint level, GLenum internalfor
                     format = bound->format;
                     type = bound->type;
                 }
+            }
+        }
+        // ZOMDROID DIAG: prove in the field which decompression width we ended up with
+        {
+            extern void zomdroid_gltrace(const char* fmt, ...);
+            static int zdxt_logged = 0;
+            if (zdxt_logged < 3) {
+                zdxt_logged++;
+                zomdroid_gltrace("DXT decompress %dx%d -> %s (16bit=%d)", width, height,
+                                 (type == GL_UNSIGNED_BYTE) ? "RGBA8" : "16-bit", !globals4es.avoid16bits);
             }
         }
         int srgb = isDXTcSRGB(internalformat);

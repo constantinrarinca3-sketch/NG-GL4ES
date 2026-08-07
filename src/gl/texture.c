@@ -995,6 +995,24 @@ GLenum minmag_float(GLenum filt) {
     }
 }
 
+// ZOMDROID GLALLOC: approximate bytes per texel of an upload request (driver may pad
+// RGB to 4 — this ledger tracks what the app ASKS for, not the driver's rounding)
+static long zga_texel_bytes(GLenum format, GLenum type) {
+    int comp;
+    switch (format) {
+        case GL_ALPHA: case GL_LUMINANCE: case GL_RED: case GL_DEPTH_COMPONENT: comp = 1; break;
+        case GL_LUMINANCE_ALPHA: case GL_RG: comp = 2; break;
+        case GL_RGB: case GL_BGR: comp = 3; break;
+        default: comp = 4; break;
+    }
+    switch (type) {
+        case GL_UNSIGNED_SHORT_5_6_5: case GL_UNSIGNED_SHORT_4_4_4_4: case GL_UNSIGNED_SHORT_5_5_5_1: return 2;
+        case GL_UNSIGNED_SHORT: return comp * 2;
+        case GL_FLOAT: case GL_UNSIGNED_INT: case GL_UNSIGNED_INT_24_8: return comp * 4;
+        default: return comp;
+    }
+}
+
 void APIENTRY_GL4ES gl4es_glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height,
                                        GLint border, GLenum format, GLenum type, const GLvoid* data) {
     DBG(SHUT_LOGD(
@@ -1028,9 +1046,186 @@ void APIENTRY_GL4ES gl4es_glTexImage2D(GLenum target, GLint level, GLint interna
         type = GL_UNSIGNED_INT_24_8;
     }
 
+    // ZOMDROID RT16 (texture lavina, 2026-07-30): PZ 42.20 world streaming keeps
+    // thousands of 4MB 1024x1024 RGBA8 textures allocated with NULL data (chunk-bake
+    // targets; the game's texture options are a proven no-op on them — identical
+    // GLALLOC traces). Drop them to 16-bit: halves the UNSWAPPABLE GL mtrack mass
+    // that gets the process shot by lmkd. LIBGL_RT16: 0=off 1=RGBA4444 (default,
+    // keeps 4-bit alpha) 2=RGBA5551 (more color, 1-bit alpha)
+    if (data == NULL && level == 0 && width >= 512 && height >= 512 &&
+        (format == GL_RGBA || format == GL_BGRA) &&
+        (type == GL_UNSIGNED_BYTE || type == GL_UNSIGNED_INT_8_8_8_8_REV)) {
+        // DEFAULT OFF since 2026-07-31: measured in the field, this branch caught
+        // exactly three textures per session (two 1024x1024 and one 2048x1024) —
+        // 8 MB saved against a 2.5 GB problem. Those textures are PZ's render targets,
+        // and lighting accumulates in them: at 4 bits per channel a light gradient
+        // breaks into visible steps and dither dots, which is what testers reported.
+        // Pure cost, no benefit. LIBGL_RT16=1 brings it back for experiments.
+        static int zrt16 = -1;
+        if (zrt16 < 0) {
+            const char* ze = getenv("LIBGL_RT16");
+            zrt16 = ze ? atoi(ze) : 0;
+        }
+        if (zrt16 == 1 || zrt16 == 2) {
+            internalformat = GL_RGBA;
+            format = GL_RGBA;
+            type = (zrt16 == 2) ? GL_UNSIGNED_SHORT_5_5_5_1 : GL_UNSIGNED_SHORT_4_4_4_4;
+            static int zrt16_logged = 0;
+            if (zrt16_logged < 3) {
+                zrt16_logged++;
+                extern void zomdroid_gltrace(const char* fmt, ...);
+                zomdroid_gltrace("RT16 mode=%d NULL-tex %dx%d -> 16-bit", zrt16, width, height);
+            }
+        }
+    }
     // proxy case
     const GLuint itarget = what_target(target);
     const GLuint rtarget = map_tex_target(target);
+    // ZOMDROID T16 BOOKKEEPING (black-vehicles fix, field report 2026-07-31): whenever
+    // this texture ends up in a 16-bit storage format — RT16 above did it for an empty
+    // texture, or the app asked for it itself — record that on the texture object.
+    // glTexSubImage2D reads it back: GLES requires a sub-upload to match the storage
+    // format, and PZ paints vehicle skins into an empty 2048x1024 atlas with RGBA8
+    // sub-uploads. Mismatched calls are rejected by the driver (silently, since we run
+    // with noerror), the atlas keeps its zeros, and every car renders black.
+    if (level == 0 && (type == GL_UNSIGNED_SHORT_4_4_4_4 || type == GL_UNSIGNED_SHORT_5_5_5_1 ||
+                       type == GL_UNSIGNED_SHORT_5_6_5)) {
+        gltexture_t* zb0 = glstate->texture.bound[glstate->texture.active][itarget];
+        if (zb0) {
+            zb0->zt16_format = format;
+            zb0->zt16_type = type;
+        }
+    }
+    // ZOMDROID ADAPTIVE TEXTURE BUDGET (RC29, field report 2026-07-31): T16 halved the
+    // lavina but on 8 GB devices the game still walks past the ceiling — a Dimensity
+    // tester was killed at 1756 MB of live textures and climbing. So: keep full
+    // resolution while there is room, and once live textures cross the budget, halve
+    // NEW uploads too (gl4es shrink mode 7: >512 with data, never empty/FBO textures).
+    // Already-resident textures stay sharp; when the game's own cache drops us back
+    // under the low-water mark, new uploads go back to full size. The visible cost
+    // (tile seams on chunks loaded while over budget) is paid only by devices that
+    // would otherwise be killed. LIBGL_TEXBUDGET=<MB>, 0 disables; an explicit
+    // LIBGL_SHRINK from the user always wins.
+    {
+        static int zbud_hi = -1, zbud_lo = 0, zbud_on = 0, zbud_manual = 0;
+        if (zbud_hi < 0) {
+            // DEFAULT OFF: halving resolution is a deal — worse textures instead of a
+            // kill — and the player has to make it knowingly, not discover it after an
+            // update. The launcher exposes it as a "memory saver" switch that sets this
+            // variable (800 MB suits 8 GB devices); unset means nothing degrades.
+            const char* ze = getenv("LIBGL_TEXBUDGET");
+            zbud_hi = ze ? atoi(ze) : 0;
+            if (zbud_hi < 0) zbud_hi = 0;
+            zbud_lo = (zbud_hi > 300) ? zbud_hi - 300 : zbud_hi; // hysteresis
+            zbud_manual = getenv("LIBGL_SHRINK") ? 1 : 0;
+        }
+        if (zbud_hi > 0 && !zbud_manual) {
+            long zlive = zomdroid_glalloc_live_tex() >> 20;
+            if (!zbud_on && zlive >= zbud_hi) {
+                zbud_on = 1;
+                globals4es.texshrink = 7;
+                zomdroid_gltrace("TEXBUDGET over %ldMB >= %dMB — new uploads halved", zlive, zbud_hi);
+            } else if (zbud_on && zlive <= zbud_lo) {
+                zbud_on = 0;
+                globals4es.texshrink = 0;
+                zomdroid_gltrace("TEXBUDGET back under %ldMB <= %dMB — full size restored", zlive, zbud_lo);
+            }
+        }
+    }
+    // ZOMDROID T16 (texture lavina, RC28): PZ streams thousands of 1024x1024 RGBA8
+    // world textures — measured 3.1GB live / 6900 objects at the lmkd kill. They are
+    // NOT DXT (the decompression crumb never fired) and the game's own texture options
+    // do not touch them, so the only lever left is the upload width. Convert big
+    // uploads to 16-bit at FULL resolution: half the driver mass without the tile-seam
+    // grid that halving resolution produced in RC26. The format follows the actual
+    // alpha content, exactly like gl4es' DXT path does. LIBGL_T16=0 disables.
+    if (data != NULL && target != GL_PROXY_TEXTURE_2D && width > 0 && height > 0 &&
+        type == GL_UNSIGNED_BYTE && (format == GL_RGBA || format == GL_RGB) &&
+        glstate->texture.unpack_row_length == 0 && glstate->texture.unpack_skip_pixels == 0 &&
+        glstate->texture.unpack_skip_rows == 0) {
+        static int zt16 = -1;
+        if (zt16 < 0) {
+            const char* ze = getenv("LIBGL_T16");
+            // (the RC34 probe that defaulted this to 0 was never handed out — the black
+            // plots turned out to be gated by the puddles option, see the hoist pass)
+            zt16 = ze ? atoi(ze) : 1;
+        }
+        gltexture_t* zb = glstate->texture.bound[glstate->texture.active][itarget];
+        if (zt16 == 1 && zb) {
+            GLenum zf = 0, zt = 0;
+            // >= 1024x1024 only (raised from 512 on 2026-07-31): the mass is the world
+            // tile stream, thousands of 1024x1024 uploads at 2 MB each once converted.
+            // The 512-and-below crowd is UI, atlases and other art the player looks at
+            // from close up — half a megabyte saved each, not worth the visible cost.
+            if (level == 0 && (long)width * height >= 1024L * 1024) {
+                if (format == GL_RGB) {
+                    zf = GL_RGB;
+                    zt = GL_UNSIGNED_SHORT_5_6_5;
+                } else {
+                    // one pass over the alpha channel: opaque -> 565 (best colors),
+                    // cutout (0/255 only) -> 5551, soft alpha -> 4444
+                    const unsigned char* zp = (const unsigned char*)data;
+                    int zopaque = 1, zsimple = 1;
+                    for (long zi = 3, zn = (long)width * height * 4; zi < zn; zi += 4) {
+                        unsigned char za = zp[zi];
+                        if (za != 255) {
+                            zopaque = 0;
+                            if (za != 0) {
+                                zsimple = 0;
+                                break;
+                            }
+                        }
+                    }
+                    zf = zopaque ? GL_RGB : GL_RGBA;
+                    zt = zopaque ? GL_UNSIGNED_SHORT_5_6_5
+                                 : (zsimple ? GL_UNSIGNED_SHORT_5_5_5_1 : GL_UNSIGNED_SHORT_4_4_4_4);
+                }
+            } else if (level > 0 && zb->zt16_type) {
+                zf = zb->zt16_format;
+                zt = zb->zt16_type;
+            }
+            if (zt) {
+                GLvoid* zdst = NULL;
+                if (pixel_convert(data, &zdst, width, height, format, type, zf, zt, 0,
+                                  glstate->texture.unpack_align) &&
+                    zdst && zdst != data) {
+                    // deferred free: the driver has copied the previous buffer long ago
+                    static GLvoid* zt16_prev = NULL;
+                    if (zt16_prev) free(zt16_prev);
+                    zt16_prev = zdst;
+                    data = zdst;
+                    format = zf;
+                    type = zt;
+                    internalformat = zf; // so swizzle_internalformat keeps the 16-bit form
+                    if (level == 0) {
+                        zb->zt16_format = zf;
+                        zb->zt16_type = zt;
+                    }
+                    static int zt16_logged = 0;
+                    if (zt16_logged < 4) {
+                        zt16_logged++;
+                        zomdroid_gltrace("T16 %dx%d RGBA8 -> %s", width, height,
+                                         zt == GL_UNSIGNED_SHORT_5_6_5
+                                                 ? "565"
+                                                 : (zt == GL_UNSIGNED_SHORT_5_5_5_1 ? "5551" : "4444"));
+                    }
+                }
+            }
+        }
+    }
+    // ZOMDROID GLALLOC: driver-side texture storage the app requests
+    // (level 0 = live size keyed by app id; higher levels count as churn only)
+    if (target != GL_PROXY_TEXTURE_2D && width > 0 && height > 0) {
+        gltexture_t* zbt = glstate->texture.bound[glstate->texture.active][itarget];
+        long zbytes = (long)width * height * zga_texel_bytes(format, type);
+        // mirror what shrink mode 7 will actually hand the driver, otherwise the budget
+        // above would never see the saving it just caused and could not fall back
+        if (globals4es.texshrink == 7 && data != NULL && width > 512 && height > 512) zbytes /= 4;
+        if (level == 0 && zbt)
+            zomdroid_glalloc_set(0, zbt->texture, zbytes);
+        else
+            zomdroid_glalloc_cum(0, zbytes);
+    }
     LOAD_GLES(glTexImage2D);
     LOAD_GLES(glTexSubImage2D);
     void gles_glTexParameteri(glTexParameteri_ARG_EXPAND); // LOAD_GLES(glTexParameteri);
@@ -1808,9 +2003,33 @@ void APIENTRY_GL4ES gl4es_glTexSubImage2D(GLenum target, GLint level, GLint xoff
         pixels_src = (const GLubyte*)temp_pixels;
     }
 
+    // ZOMDROID T16 (black-vehicles fix): if this texture is stored in one of our 16-bit
+    // formats, the sub-upload has to speak the same format or the driver drops it. PZ
+    // builds vehicle skins exactly this way — empty 16-bit atlas, then RGBA8 patches.
+    GLvoid* zconv = NULL;
+    {
+        gltexture_t* zb = glstate->texture.bound[glstate->texture.active][what_target(target)];
+        if (zb && zb->zt16_type && (format != zb->zt16_format || type != zb->zt16_type) &&
+            type == GL_UNSIGNED_BYTE && (format == GL_RGBA || format == GL_RGB || format == GL_BGRA)) {
+            if (pixel_convert(pixels_src, &zconv, width, height, format, type, zb->zt16_format, zb->zt16_type, 0,
+                              glstate->texture.unpack_align) &&
+                zconv) {
+                pixels_src = (const GLubyte*)zconv;
+                format = zb->zt16_format;
+                type = zb->zt16_type;
+                static int zsub_logged = 0;
+                if (zsub_logged < 3) {
+                    zsub_logged++;
+                    zomdroid_gltrace("T16 sub-upload %dx%d converted to texture storage format", width, height);
+                }
+            }
+        }
+    }
+
     LOAD_GLES2(glTexSubImage2D);
     gles_glTexSubImage2D(target, level, xoffset, yoffset, width, height, format, type, (const GLvoid*)pixels_src);
 
+    if (zconv) free(zconv);
     if (temp_pixels) free(temp_pixels);
 }
 

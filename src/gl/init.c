@@ -416,6 +416,15 @@ void initialize_gl4es() {
     }
 
     globals4es.texshrink = ReturnEnvVarInt("LIBGL_SHRINK");
+    // ZOMDROID (texture lavina, 2026-07-30): PZ 42.20 world streaming keeps thousands of
+    // 4MB 1024x1024 chunk-bake textures live (measured: 3.1GB / 6600 objects at the lmkd
+    // kill; the game's own texture options are a proven no-op on them). Mode 7 halves
+    // every >512 texture WITH data — the bake output — and leaves empty ones alone, so
+    // FBO targets keep their size (RT16 handles those).
+    // RC27: default OFF again — halving atlases made tile seams bleed into a visible
+    // grid in-game. The 16-bit DXT decompression below saves the same order of memory
+    // without touching resolution. LIBGL_SHRINK=7 re-enables it if memory gets tight.
+    if (!getenv("LIBGL_SHRINK")) globals4es.texshrink = 0;
     switch (globals4es.texshrink) {
     case 10:
         SHUT_LOGD("Texture shrink, mode 10 selected (advertise 8192 max texture size, but >2048 are quadshrinked and > "
@@ -614,6 +623,15 @@ void initialize_gl4es() {
             SHUT_LOGD("Don't avoid 16bits textures");
         }
     }
+    // ZOMDROID (texture lavina, root cause found 2026-07-30): PZ ships DXT-compressed
+    // textures (textureCompression=true) and Adreno/Mali expose no S3TC, so gl4es
+    // decompresses every one of them — with avoid16bits=1 (the non-IMGTEC default) into
+    // full RGBA8: 4MB per 1024x1024 chunk texture, thousands live => the 4.8GB GL mtrack
+    // that gets the process shot by lmkd. Decompressing into 16 bits instead halves that
+    // mass at FULL resolution (no shrink artifacts); the per-texture format is chosen
+    // from the actual alpha content (565 / 5551 / 4444) in texture_compressed.c.
+    // LIBGL_AVOID16BITS=1 restores 32-bit decompression.
+    if (!getenv("LIBGL_AVOID16BITS")) globals4es.avoid16bits = 0;
 
     if (GetEnvVarInt("LIBGL_AVOID24BITS", &globals4es.avoid24bits, 0)) {
         switch (globals4es.avoid24bits) {
@@ -852,9 +870,18 @@ void initialize_gl4es() {
         env(LIBGL_NOPSA, globals4es.nopsa, "Don't use PrecompiledShaderArchive");
         if (globals4es.nopsa == 0) {
             cwd[0] = '\0';
-            // TODO: What to do on ANDROID and EMSCRIPTEN?
             const char* custom_psa = GetEnvVar("LIBGL_PSA_FOLDER");
-#ifdef __linux__
+            // ZOMDROID: upstream left Android as a TODO (path came from $HOME), so the
+            // PSA never activated and EVERY launch re-paid the full FPE warmup — the
+            // "new zone stutter burst" testers feel. Store the archive next to the
+            // flight recorder in the app-private dir (write-proven all week).
+#if defined(ANDROID) || defined(__ANDROID__)
+            if (custom_psa)
+                strcpy(cwd, custom_psa);
+            else
+                strcpy(cwd, "/data/data/com.zomdroid/files");
+            if (strlen(cwd) && cwd[strlen(cwd) - 1] != '/') strcat(cwd, "/");
+#elif defined __linux__
             const char* home = GetEnvVar("HOME");
             if (custom_psa)
                 strcpy(cwd, custom_psa);
@@ -872,6 +899,10 @@ void initialize_gl4es() {
                 strcat(cwd, ".gl4es.psa");
                 fpe_InitPSA(cwd);
                 fpe_readPSA();
+                {
+                    extern void zomdroid_gltrace(const char* fmt, ...);
+                    zomdroid_gltrace("PSA enabled: %s", cwd);
+                }
             }
         }
     } else
@@ -885,11 +916,13 @@ void initialize_gl4es() {
     // verify WHICH renderer actually loaded (Zomdroid resets the choice on new instances).
     {
         extern void zomdroid_gltrace(const char* fmt, ...);
-        zomdroid_gltrace("INIT ng_gl4es RC14-PLAY (guise moved to constructor = true LIBGL_GL=21 equivalent), noerror=%d",
+        zomdroid_gltrace("INIT ng_gl4es RC35-PLAY (hoist only without driver ext; multi-line hoist; T16 restored), noerror=%d",
                          globals4es.noerror);
         {
             extern void zomdroid_exit_probe_register(void);
+            extern void zomdroid_memstat_tag(const char*);
             zomdroid_exit_probe_register();
+            zomdroid_memstat_tag("init");
         }
     }
 }

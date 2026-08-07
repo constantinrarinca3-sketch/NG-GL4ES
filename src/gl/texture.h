@@ -161,6 +161,9 @@ typedef struct {
     glsampler_t sampler;    // internal sampler if not superseded by glBindSampler
     glsampler_t actual;     // actual sampler
     float fbtex_ratio; // Lower rendering resolution
+    // ZOMDROID T16: 16-bit format picked for this texture's level 0, reused for its
+    // mipmap levels so a texture never mixes widths across its chain.
+    GLenum zt16_format, zt16_type;
 } gltexture_t;
 
 KHASH_MAP_DECLARE_INT(tex, gltexture_t *);
