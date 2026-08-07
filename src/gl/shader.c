@@ -1,4 +1,5 @@
 #include "shader.h"
+#include <time.h>
 
 #include "../glx/hardext.h"
 #include "debug.h"
@@ -266,6 +267,410 @@ static char* zomdroid_floatify_builtin_args(char* src) {
     return out;
 }
 
+// ZOMDROID PERF (conversion cache, floor 1 of the warm-cache plan, 2026-07-29):
+// RC19 timing on a fresh save showed OUR string passes are the top stutter source:
+// 302 shaders -> CONVERT 1803ms total, 26 big ones eating 1652ms (worst 306ms for a
+// single 22KB chunk shader), vs driver COMPILE 638ms / LINK 545ms. The passes are
+// deterministic, so cache their product on disk keyed by the ORIGINAL source:
+//   files/ngg_convcache/cc_<fnv64>_<len>.bin =
+//     [u32 olen][orig][u32 slen][mutated source][u32 clen][converted]
+//     [u16 n]{u16,name u16,type u16,value}*n      (uniform-defaults table)
+// The stored original is memcmp-verified on load — a false hit is impossible.
+// First-ever encounter pays full price and writes; every later encounter (same run or
+// months later) restores in ~0ms. LIBGL_NOCONVCACHE=1 disables. Stale entries are
+// harmless (key = content); the dir can always be deleted.
+#include <sys/stat.h>
+int zccache_hits = 0, zccache_miss = 0;
+static const char* ZCC_DIR = "/data/data/com.zomdroid/files/ngg_convcache";
+static int zcc_enabled(void) {
+    // RELEASE SAFETY (2026-07-29): a fresh SIGSEGV (si_addr=0xd, save-load, exactly one
+    // cache hit in the run) implicates the hit path. Until that autopsy is done the
+    // cache is OPT-IN: set LIBGL_CONVCACHE=1 to enable. Perf work must never gamble a
+    // release.
+    static int zst = -1;
+    if (zst < 0) {
+        const char* e = getenv("LIBGL_CONVCACHE");
+        zst = (e && e[0] == '1') ? 1 : 0;
+        if (zst) mkdir(ZCC_DIR, 0700);
+    }
+    return zst;
+}
+static unsigned long long zcc_fnv64(const char* s, size_t n) {
+    unsigned long long h = 1469598103934665603ULL;
+    for (size_t i = 0; i < n; i++) {
+        h ^= (unsigned char)s[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+static void zcc_path(char* out, size_t cap, const char* orig, size_t olen) {
+    snprintf(out, cap, "%s/cc_%016llx_%zu.bin", ZCC_DIR, zcc_fnv64(orig, olen), olen);
+}
+static int zcc_rd(FILE* f, void* p, size_t n) { return fread(p, 1, n, f) == n; }
+static char* zcc_rdblk(FILE* f, unsigned* plen) {
+    unsigned n;
+    if (!zcc_rd(f, &n, 4) || n > 16u * 1024 * 1024) return NULL;
+    char* b = (char*)malloc((size_t)n + 1);
+    if (!b) return NULL;
+    if (n && !zcc_rd(f, b, n)) {
+        free(b);
+        return NULL;
+    }
+    b[n] = '\0';
+    if (plen) *plen = n;
+    return b;
+}
+// Returns 1 on verified hit (fields of glshader replaced), 0 otherwise.
+static int zomdroid_ccache_try(struct shader_s* glshader, const char* orig, size_t olen) {
+    if (!zcc_enabled()) return 0;
+    char path[512];
+    zcc_path(path, sizeof(path), orig, olen);
+    FILE* f = fopen(path, "rb");
+    if (!f) return 0;
+    int ok = 0;
+    char *sorig = NULL, *smut = NULL, *sconv = NULL;
+    unsigned lo = 0;
+    do {
+        sorig = zcc_rdblk(f, &lo);
+        if (!sorig || lo != olen || memcmp(sorig, orig, olen) != 0) break;
+        smut = zcc_rdblk(f, NULL);
+        sconv = zcc_rdblk(f, NULL);
+        if (!smut || !sconv) break;
+        unsigned short n;
+        if (!zcc_rd(f, &n, 2) || n > MAX_UNIFORM_VARIABLE_NUMBER) break;
+        int bad = 0;
+        for (int i = 0; i < n && !bad; i++) {
+            unsigned short l[3];
+            char* dst[3] = { glshader->uniforms_declarations[i].variable, glshader->uniforms_declarations[i].type,
+                             glshader->uniforms_declarations[i].initial_value };
+            unsigned cap3[3] = { MAX_VARIABLE_LENGTH, MAX_UNIFORM_TYPE_LENGTH, MAX_INITIAL_VALUE_LENGTH };
+            for (int k = 0; k < 3; k++) {
+                if (!zcc_rd(f, &l[k], 2) || l[k] >= cap3[k] || (l[k] && !zcc_rd(f, dst[k], l[k]))) {
+                    bad = 1;
+                    break;
+                }
+                dst[k][l[k]] = '\0';
+            }
+        }
+        if (bad) break;
+        glshader->uniforms_declarations_count = n;
+        free(glshader->source);
+        glshader->source = smut;
+        smut = NULL;
+        free(glshader->converted);
+        glshader->converted = sconv;
+        sconv = NULL;
+        ok = 1;
+    } while (0);
+    free(sorig);
+    free(smut);
+    if (!ok) free(sconv);
+    fclose(f);
+    if (ok) zccache_hits++;
+    return ok;
+}
+static void zomdroid_ccache_store(struct shader_s* glshader, const char* orig, size_t olen) {
+    if (!zcc_enabled() || !glshader->converted || !glshader->source) return;
+    zccache_miss++;
+    char path[512], tmp[520];
+    zcc_path(path, sizeof(path), orig, olen);
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    FILE* f = fopen(tmp, "wb");
+    if (!f) return;
+    unsigned v;
+    int ok = 1;
+#define ZCC_WB(P, N)                                                                                                   \
+    do {                                                                                                               \
+        v = (unsigned)(N);                                                                                             \
+        ok = ok && fwrite(&v, 1, 4, f) == 4 && (v == 0 || fwrite((P), 1, v, f) == v);                                  \
+    } while (0)
+    ZCC_WB(orig, olen);
+    ZCC_WB(glshader->source, strlen(glshader->source));
+    ZCC_WB(glshader->converted, strlen(glshader->converted));
+#undef ZCC_WB
+    unsigned short n = (unsigned short)glshader->uniforms_declarations_count;
+    if (n > MAX_UNIFORM_VARIABLE_NUMBER) n = MAX_UNIFORM_VARIABLE_NUMBER;
+    ok = ok && fwrite(&n, 1, 2, f) == 2;
+    for (int i = 0; i < n && ok; i++) {
+        const char* s3[3] = { glshader->uniforms_declarations[i].variable, glshader->uniforms_declarations[i].type,
+                              glshader->uniforms_declarations[i].initial_value };
+        for (int k = 0; k < 3 && ok; k++) {
+            unsigned short l = (unsigned short)strlen(s3[k]);
+            ok = fwrite(&l, 1, 2, f) == 2 && (l == 0 || fwrite(s3[k], 1, l, f) == l);
+        }
+    }
+    fclose(f);
+    if (ok) rename(tmp, path);
+    else remove(tmp);
+}
+
+// ZOMDROID FIX (Mali strictness, wave 4 — field report 2026-07-26): ivec-TYPED
+// EXPRESSIONS in arithmetic with float vectors. PZ's shadow-blur does
+//     min((pixel + ivec2(x, y)) * pixelStep, maxUV)
+// where pixel is ivec2 and pixelStep is vec2 — legal only under
+// GL_EXT_shader_implicit_conversions, which some Mali drivers flatly lack
+// ("Extension not supported" -> S0001 ivec2*vec2 -> link failure -> broken shadows).
+// Correctness must not depend on the extension: wrap the ivec-side operand in vecN().
+// Waves 1-3 covered bare int LITERALS and int MACROS; this covers typed ivec values:
+// declared ivecN identifiers, ivecN(...) constructor calls, and parenthesized groups
+// with pure-int content — whenever the OTHER operand of + - * / is a declared vecN.
+
+#define ZVEC_MAX_IDS 128
+#define ZVEC_ID_LEN 64
+typedef struct {
+    char name[ZVEC_ID_LEN];
+    int n; // component count 2..4
+} zvec_id_t;
+
+static int zomdroid_collect_vecn_ids(const char* src, const char* base /*"vec" or "ivec"*/, zvec_id_t* ids) {
+    int n = 0;
+    size_t blen = strlen(base);
+    for (const char* p = src; (p = strstr(p, base)) != NULL; p += blen) {
+        if (p > src && (isalnum((unsigned char)p[-1]) || p[-1] == '_')) continue;
+        char digit = p[blen];
+        if (digit < '2' || digit > '4') continue;
+        const char* q = p + blen + 1;
+        if (isalnum((unsigned char)*q) || *q == '_') continue; // e.g. vec2ToX
+        while (*q == ' ' || *q == '\t') q++;
+        if (!(isalpha((unsigned char)*q) || *q == '_')) continue; // constructor call etc.
+        const char* s = q;
+        while (isalnum((unsigned char)*q) || *q == '_') q++;
+        size_t len = (size_t)(q - s);
+        const char* r = q;
+        while (*r == ' ' || *r == '\t') r++;
+        if (*r == '(') continue; // function returning vecN, not a variable
+        if (len < ZVEC_ID_LEN && n < ZVEC_MAX_IDS) {
+            memcpy(ids[n].name, s, len);
+            ids[n].name[len] = '\0';
+            ids[n].n = digit - '0';
+            n++;
+        }
+    }
+    return n;
+}
+
+static int zvec_lookup(const char* tok, size_t len, zvec_id_t* ids, int idn) {
+    for (int i = 0; i < idn; i++)
+        if (strlen(ids[i].name) == len && !strncmp(tok, ids[i].name, len)) return ids[i].n;
+    return 0;
+}
+
+// Operand classification within one line. Returns span [*s..*e) and kind:
+// 0 unknown, 1 known float-vec (out_n = its N), 2 ivec-ish (id / ivecN(..) / pure-int group).
+static int zvec_classify_left(const char* line, int op_i, int* s, int* e, zvec_id_t* vecs, int vn, zvec_id_t* ivecs,
+                              int in_, int* out_n) {
+    int i = op_i;
+    while (i > 0 && (line[i - 1] == ' ' || line[i - 1] == '\t')) i--;
+    if (i == 0) return 0;
+    *e = i;
+    if (line[i - 1] == ')') { // balanced group, maybe a call
+        int d = 0, j = i - 1;
+        while (j >= 0) {
+            if (line[j] == ')') d++;
+            else if (line[j] == '(') {
+                d--;
+                if (!d) break;
+            }
+            j--;
+        }
+        if (j < 0) return 0;
+        int g = j; // '(' index
+        int idend = j;
+        while (idend > 0 && (isalnum((unsigned char)line[idend - 1]) || line[idend - 1] == '_')) idend--;
+        if (idend < j) { // call name present
+            size_t il = (size_t)(j - idend);
+            *s = idend;
+            if (il > 4 && !strncmp(line + idend, "ivec", 4)) return 2; // ivecN(...) call
+            if (zvec_lookup(line + idend, il, vecs, vn)) { *out_n = zvec_lookup(line + idend, il, vecs, vn); return 1; }
+            return 0; // some other call — unknown type
+        }
+        *s = g;
+        // group content: ivec-ish if it references ivec ids or ivec ctor and no float hints
+        int has_ivec = 0, has_float = 0;
+        for (int k = g + 1; k < i - 1; k++) {
+            if (line[k] == '.' && isdigit((unsigned char)line[k + 1])) has_float = 1;
+            if (!strncmp(line + k, "ivec", 4)) has_ivec = 1;
+            if (isalpha((unsigned char)line[k]) || line[k] == '_') {
+                int t = k;
+                while (isalnum((unsigned char)line[k]) || line[k] == '_') k++;
+                if (zvec_lookup(line + t, (size_t)(k - t), ivecs, in_)) has_ivec = 1;
+                if (zvec_lookup(line + t, (size_t)(k - t), vecs, vn)) has_float = 1;
+                k--;
+            }
+        }
+        if (has_ivec && !has_float) return 2;
+        return 0;
+    }
+    if (isalnum((unsigned char)line[i - 1]) || line[i - 1] == '_') {
+        int j = i;
+        while (j > 0 && (isalnum((unsigned char)line[j - 1]) || line[j - 1] == '_')) j--;
+        if (j > 0 && line[j - 1] == '.') return 0; // swizzle/member — component, not vector
+        *s = j;
+        size_t il = (size_t)(i - j);
+        int nn = zvec_lookup(line + j, il, vecs, vn);
+        if (nn) { *out_n = nn; return 1; }
+        if (zvec_lookup(line + j, il, ivecs, in_)) return 2;
+        return 0;
+    }
+    return 0;
+}
+
+static int zvec_classify_right(const char* line, size_t len, int op_i, int* s, int* e, zvec_id_t* vecs, int vn,
+                               zvec_id_t* ivecs, int in_, int* out_n) {
+    int i = op_i + 1;
+    while (i < (int)len && (line[i] == ' ' || line[i] == '\t')) i++;
+    if (i >= (int)len) return 0;
+    *s = i;
+    if (isalpha((unsigned char)line[i]) || line[i] == '_') {
+        int j = i;
+        while (j < (int)len && (isalnum((unsigned char)line[j]) || line[j] == '_')) j++;
+        int k = j;
+        while (k < (int)len && (line[k] == ' ' || line[k] == '\t')) k++;
+        if (k < (int)len && line[k] == '(') { // call
+            int d = 0;
+            int m = k;
+            while (m < (int)len) {
+                if (line[m] == '(') d++;
+                else if (line[m] == ')') {
+                    d--;
+                    if (!d) break;
+                }
+                m++;
+            }
+            if (m >= (int)len) return 0;
+            *e = m + 1;
+            if (!strncmp(line + i, "ivec", 4)) return 2;
+            int nn = zvec_lookup(line + i, (size_t)(j - i), vecs, vn);
+            if (nn) { *out_n = nn; return 1; }
+            return 0;
+        }
+        if (j < (int)len && line[j] == '.') return 0; // swizzled — component access
+        *e = j;
+        int nn = zvec_lookup(line + i, (size_t)(j - i), vecs, vn);
+        if (nn) { *out_n = nn; return 1; }
+        if (zvec_lookup(line + i, (size_t)(j - i), ivecs, in_)) return 2;
+        return 0;
+    }
+    if (line[i] == '(') {
+        int d = 0, m = i;
+        while (m < (int)len) {
+            if (line[m] == '(') d++;
+            else if (line[m] == ')') {
+                d--;
+                if (!d) break;
+            }
+            m++;
+        }
+        if (m >= (int)len) return 0;
+        *e = m + 1;
+        int has_ivec = 0, has_float = 0;
+        for (int k = i + 1; k < m; k++) {
+            if (line[k] == '.' && isdigit((unsigned char)line[k + 1])) has_float = 1;
+            if (!strncmp(line + k, "ivec", 4)) has_ivec = 1;
+            if (isalpha((unsigned char)line[k]) || line[k] == '_') {
+                int t = k;
+                while (isalnum((unsigned char)line[k]) || line[k] == '_') k++;
+                if (zvec_lookup(line + t, (size_t)(k - t), ivecs, in_)) has_ivec = 1;
+                if (zvec_lookup(line + t, (size_t)(k - t), vecs, vn)) has_float = 1;
+                k--;
+            }
+        }
+        if (has_ivec && !has_float) return 2;
+        return 0;
+    }
+    return 0;
+}
+
+// One in-place rewrite per call; returns 1 if a wrap was applied to this line buffer.
+static int zvec_wrap_once(char* line, size_t* plen, size_t cap, zvec_id_t* vecs, int vn, zvec_id_t* ivecs, int in_) {
+    size_t len = *plen;
+    for (int i = 0; i < (int)len; i++) {
+        char c = line[i];
+        if (c == '/' && i + 1 < (int)len && (line[i + 1] == '/' || line[i + 1] == '*')) break; // comment
+        if (c != '*' && c != '/' && c != '+' && c != '-') continue;
+        if (c == '-') { // binary only: previous non-space char must be an operand ending
+            int pb = i - 1;
+            while (pb >= 0 && (line[pb] == ' ' || line[pb] == '\t')) pb--;
+            if (pb < 0 || strchr("=,(+-*/<>&|?:", line[pb])) continue; // unary minus
+        }
+        int ls, le, rs, re, lu = 0, ru = 0;
+        int lk = zvec_classify_left(line, i, &ls, &le, vecs, vn, ivecs, in_, &lu);
+        int rk = zvec_classify_right(line, len, i, &rs, &re, vecs, vn, ivecs, in_, &ru);
+        int wrap_s = -1, wrap_e = -1, nn = 0;
+        if (lk == 1 && rk == 2) { wrap_s = rs; wrap_e = re; nn = lu; }
+        else if (lk == 2 && rk == 1) { wrap_s = ls; wrap_e = le; nn = ru; }
+        if (wrap_s < 0) continue;
+        char head[8];
+        int hl = snprintf(head, sizeof(head), "vec%d(", nn);
+        if (len + hl + 1 + 1 > cap) return 0;
+        memmove(line + wrap_e + hl + 1, line + wrap_e, len - wrap_e + 1);
+        line[wrap_e + hl] = ')';
+        memmove(line + wrap_s + hl, line + wrap_s, (size_t)(wrap_e - wrap_s));
+        memcpy(line + wrap_s, head, hl);
+        *plen = len + hl + 1;
+        return 1;
+    }
+    return 0;
+}
+
+static char* zomdroid_vecify_ivec_arith(char* src) {
+    if (!src || !strstr(src, "ivec")) return src;
+    zvec_id_t* vecs = (zvec_id_t*)malloc(sizeof(zvec_id_t) * ZVEC_MAX_IDS);
+    zvec_id_t* ivecs = (zvec_id_t*)malloc(sizeof(zvec_id_t) * ZVEC_MAX_IDS);
+    if (!vecs || !ivecs) {
+        free(vecs);
+        free(ivecs);
+        return src;
+    }
+    int vn = zomdroid_collect_vecn_ids(src, "vec", vecs);
+    int in_ = zomdroid_collect_vecn_ids(src, "ivec", ivecs);
+    if (!vn || !in_) {
+        free(vecs);
+        free(ivecs);
+        return src;
+    }
+    size_t slen = strlen(src);
+    char* out = (char*)malloc(slen * 2 + 64);
+    if (!out) {
+        free(vecs);
+        free(ivecs);
+        return src;
+    }
+    char lbuf[2048];
+    char* o = out;
+    const char* p = src;
+    while (*p) {
+        const char* nl = strchr(p, '\n');
+        size_t len = nl ? (size_t)(nl - p) + 1 : strlen(p);
+        int touchable = len < sizeof(lbuf) - 64 && !memchr(p, '#', len) && !memchr(p, '[', len);
+        if (touchable && (strstr(p, "ivec") == NULL || (size_t)(strstr(p, "ivec") - p) >= len)) {
+            // fast path: line has no ivec ctor; still may reference an ivec-declared id
+            int any = 0;
+            for (int i = 0; i < in_ && !any; i++)
+                if (strstr(p, ivecs[i].name) && (size_t)(strstr(p, ivecs[i].name) - p) < len) any = 1;
+            if (!any) touchable = 0;
+        }
+        if (touchable) {
+            memcpy(lbuf, p, len);
+            lbuf[len] = '\0';
+            size_t ll = len;
+            int guard = 0;
+            while (guard++ < 8 && zvec_wrap_once(lbuf, &ll, sizeof(lbuf), vecs, vn, ivecs, in_)) {}
+            memcpy(o, lbuf, ll);
+            o += ll;
+        } else {
+            memcpy(o, p, len);
+            o += len;
+        }
+        p += len;
+    }
+    *o = '\0';
+    free(vecs);
+    free(ivecs);
+    free(src);
+    return out;
+}
+
 // ZOMDROID FIX (Mali strictness, wave 2): Mali rejects EVERY implicit int<->float mix
 // and ignores GL_EXT_shader_implicit_conversions (reported "not supported"). The RC2
 // passes covered const-float initializers and builtin args; the 28 shaders failing on
@@ -336,6 +741,48 @@ static int zomdroid_collect_int_macros(const char* src, char ids[ZFLT_MAX_IDS][Z
     return n;
 }
 
+// ZOMDROID FIX (Mali/ANGLE wave 5): integer UNIFORMS used in float arithmetic. PZ's
+// fade shader does "alpha * (BASE_OPACITY * opacityScale)" where opacityScale is
+// "uniform int" — strict ES compilers reject 'const float' * 'uniform highp int'.
+// The declaration must stay integer (the game sets it with glUniform1i), so uses get
+// float()-wrapped exactly like int-valued macros; both lists share the wrap below.
+static int zomdroid_collect_int_uniforms(const char* src, char ids[ZFLT_MAX_IDS][ZFLT_ID_LEN], int n) {
+    for (const char* p = src; (p = strstr(p, "uniform")) != NULL; p += 7) {
+        if (p > src && (isalnum((unsigned char)p[-1]) || p[-1] == '_')) continue;
+        const char* q = p + 7;
+        for (;;) {
+            while (*q == ' ' || *q == '\t')
+                q++;
+            if (!strncmp(q, "highp", 5) || !strncmp(q, "lowp", 4)) {
+                q += (*q == 'h') ? 5 : 4;
+                continue;
+            }
+            if (!strncmp(q, "mediump", 7)) {
+                q += 7;
+                continue;
+            }
+            break;
+        }
+        if (strncmp(q, "int", 3) || isalnum((unsigned char)q[3]) || q[3] == '_') continue;
+        q += 3;
+        while (*q == ' ' || *q == '\t')
+            q++;
+        const char* s = q;
+        while (isalnum((unsigned char)*q) || *q == '_')
+            q++;
+        size_t len = (size_t)(q - s);
+        while (*q == ' ' || *q == '\t')
+            q++;
+        if (*q == '[') continue; // arrays are indexed with ints — leave them alone
+        if (len && len < ZFLT_ID_LEN && n < ZFLT_MAX_IDS) {
+            memcpy(ids[n], s, len);
+            ids[n][len] = '\0';
+            n++;
+        }
+    }
+    return n;
+}
+
 static int zomdroid_line_has_float_id(const char* line, size_t len, char ids[ZFLT_MAX_IDS][ZFLT_ID_LEN], int idn) {
     for (int i = 0; i < idn; i++) {
         size_t il = strlen(ids[i]);
@@ -374,6 +821,8 @@ static char* zomdroid_floatify_float_context_lines(char* src) {
     }
     int idn = zomdroid_collect_float_ids(src, ids);
     int macn = zomdroid_collect_int_macros(src, macs);
+    // int uniforms share the float()-wrapping list with int macros (same problem)
+    macn = zomdroid_collect_int_uniforms(src, macs, macn);
     size_t slen = strlen(src);
     char* out = (char*)malloc(slen * 3 + 64);
     if (!out) {
@@ -493,6 +942,299 @@ static char* zomdroid_floatify_float_context_lines(char* src) {
     free(macs);
     free(src);
     return out;
+}
+
+// ZOMDROID FIX (Mali/ANGLE wave 5, field report 2026-07-31): GLSL ES demands that
+// global initializers be constant expressions. PZ's puddles/water shaders initialize
+// globals straight from a uniform —
+//     float muddyPuddles = PuddlesParams[1].x;
+// — which desktop GLSL 1.20 accepts and every strict ES compiler rejects ("global
+// variable initializers must be constant expressions"). Nine shaders died on exactly
+// this on a Dimensity/ANGLE device. Split them: the declaration stays at file scope,
+// the initializer moves to the top of main() in source order, so dependency chains
+// between such globals keep working. Only declarations ABOVE main() are touched.
+static int zomdroid_rhs_is_constant(const char* s, size_t len) {
+    // constant = literals and type constructors only; any other identifier (uniform,
+    // varying, another hoisted global) makes it a runtime value
+    for (size_t i = 0; i < len; i++) {
+        if (!(isalpha((unsigned char)s[i]) || s[i] == '_')) continue;
+        if (i > 0 && (isalnum((unsigned char)s[i - 1]) || s[i - 1] == '_' || s[i - 1] == '.')) continue;
+        size_t j = i;
+        while (j < len && (isalnum((unsigned char)s[j]) || s[j] == '_'))
+            j++;
+        size_t il = j - i;
+        // a float suffix / exponent is part of a number, not an identifier
+        if (!(i > 0 && isdigit((unsigned char)s[i - 1]))) {
+            // constructors plus the pure builtins GLSL itself folds at compile time —
+            // "vec3 v = normalize(vec3(...))" is a legal constant initializer, no need
+            // to move it (only its ARGUMENTS decide, and they are scanned here too)
+            static const char* ctor[] = { "float",  "int",     "uint",  "bool",  "vec2",   "vec3",
+                                          "vec4",   "ivec2",   "ivec3", "ivec4", "uvec2",  "uvec3",
+                                          "uvec4",  "mat2",    "mat3",  "mat4",  "true",   "false",
+                                          "normalize", "radians", "degrees", "sqrt", "inversesqrt",
+                                          "abs",    "sign",    "floor", "ceil",  "fract",  "min",
+                                          "max",    "clamp",   "mix",   "step",  "pow",    "exp",
+                                          "log",    "exp2",    "log2",  "sin",   "cos",    "tan",
+                                          "length", "dot",     "cross" };
+            int isctor = 0;
+            for (unsigned c = 0; c < sizeof(ctor) / sizeof(ctor[0]); c++)
+                if (strlen(ctor[c]) == il && !strncmp(s + i, ctor[c], il)) {
+                    isctor = 1;
+                    break;
+                }
+            if (!isctor) return 0;
+        }
+        i = j - 1;
+    }
+    return 1;
+}
+// main() DEFINITION (PZ prototypes it too, and in the puddles shaders main is defined
+// ABOVE the globals and even above the uniforms — so the initializers cannot simply be
+// moved to the top of main; they go into an init function placed next to the
+// declarations, which main calls through a prototype in the preamble).
+static const char* zomdroid_find_main_brace(const char* src) {
+    const char* p = src;
+    while ((p = strstr(p, "void main")) != NULL) {
+        const char* par = strchr(p, '(');
+        const char* brace = strchr(p, '{');
+        const char* semi = strchr(p, ';');
+        if (par && brace && (!semi || semi > brace)) return brace;
+        p += 9;
+    }
+    return NULL;
+}
+// end of the leading #version / #extension / precision-free preprocessor block: the
+// first spot where a declaration may legally appear
+static size_t zomdroid_preamble_end(const char* src) {
+    size_t off = 0;
+    const char* p = src;
+    while (*p) {
+        const char* nl = strchr(p, '\n');
+        size_t len = nl ? (size_t)(nl - p) + 1 : strlen(p);
+        const char* q = p + strspn(p, " \t\r");
+        if (*q == '\0' || *q == '\n' || *q == '\r' || *q == '#' || (q[0] == '/' && q[1] == '/')) {
+            off += len;
+            p += len;
+            continue;
+        }
+        break;
+    }
+    return off;
+}
+static char* zomdroid_hoist_global_initializers(char* src) {
+    if (!src) return src;
+    // ZOMDROID FIX (black farming plots, field 2026-08-04): this rewrite exists ONLY
+    // for drivers that lack GL_EXT_shader_non_constant_global_initializers (ANGLE).
+    // Where the driver honors it (Adreno, most vendor Malis), the untouched shader is
+    // exactly what every pre-wave5 build shipped — and rewriting anyway proved able to
+    // shift the puddles blend math (wet farming plots went black with puddles ON).
+    // Prefer the driver; hoist only when there is no other way to compile at all.
+    if (hardext.nonconstinit) return src;
+    if (!zomdroid_find_main_brace(src)) return src;
+    size_t slen = strlen(src);
+    char* out = (char*)malloc(slen * 2 + 4096);
+    char* hoist = (char*)malloc(slen + 1024);
+    if (!out || !hoist) {
+        free(out);
+        free(hoist);
+        return src;
+    }
+    char* o = out;
+    char* h = hoist;
+    int nh = 0, depth = 0, blockcomment = 0, ppdepth = 0;
+    size_t last_decl_end = 0;
+    const char* p = src;
+    while (*p) {
+        const char* nl = strchr(p, '\n');
+        size_t len = nl ? (size_t)(nl - p) + 1 : strlen(p);
+        int handled = 0;
+        size_t consume = len; // grows past the line only for a HOISTED multi-line init
+        // Conditional blocks are off limits (learned on PZ's skybox shader): the same
+        // global is declared once per #ifdef branch, so hoisting would merge day and
+        // night values into one function — and that function would land INSIDE the
+        // branch, vanishing with it while the call in main() remained.
+        {
+            const char* d = p + strspn(p, " \t");
+            if (*d == '#') {
+                const char* w = d + 1 + strspn(d + 1, " \t");
+                if (!strncmp(w, "if", 2)) ppdepth++;
+                else if (!strncmp(w, "endif", 5) && ppdepth > 0) ppdepth--;
+            }
+        }
+        if (!blockcomment && depth == 0 && ppdepth == 0) {
+            const char* q = p + strspn(p, " \t");
+            static const char* skipw[] = { "const",     "uniform", "attribute", "varying", "in",
+                                           "out",       "layout",  "struct",    "precision", "flat",
+                                           "invariant", "#",       "//",        "/*" };
+            int skip = 0;
+            for (unsigned s = 0; !skip && s < sizeof(skipw) / sizeof(skipw[0]); s++) {
+                size_t wl = strlen(skipw[s]);
+                if (!strncmp(q, skipw[s], wl) && !(isalnum((unsigned char)q[wl]) || q[wl] == '_')) skip = 1;
+            }
+            if (!skip) {
+                const char* t = q;
+                while (isalnum((unsigned char)*t) || *t == '_')
+                    t++;
+                int tlen = (int)(t - q);
+                // "mat2/3/4" are valid here too but not in the shared type-word helper
+                int istype = zomdroid_is_type_word(q, tlen) ||
+                             (tlen == 4 && !strncmp(q, "mat", 3) && q[3] >= '2' && q[3] <= '4');
+                if (istype) {
+                    const char* n = t + strspn(t, " \t");
+                    const char* ne = n;
+                    while (isalnum((unsigned char)*ne) || *ne == '_')
+                        ne++;
+                    const char* e = ne + strspn(ne, " \t");
+                    if (ne > n && *e == '=' && e[1] != '=') {
+                        const char* rhs = e + 1 + strspn(e + 1, " \t");
+                        const char* semi = (const char*)memchr(rhs, ';', len - (size_t)(rhs - p));
+                        // Multi-line initializer (PZ's water shaders wrap them): scan
+                        // ahead for the ';', refusing to cross a block or directive.
+                        // Skipping these caused MIXED semantics — hoisted globals were
+                        // still zero while a leftover global initializer read them.
+                        // A hoist must be all-or-nothing to preserve evaluation order.
+                        if (!semi && !memchr(rhs, '{', len - (size_t)(rhs - p))) {
+                            const char* lim = rhs + 2048;
+                            for (const char* c = p + len; *c && c < lim; c++) {
+                                if (*c == '{' || *c == '}' || *c == '#') break;
+                                if (*c == ';') {
+                                    semi = c;
+                                    break;
+                                }
+                            }
+                        }
+                        size_t mlspan = 0;
+                        if (semi && semi >= p + len) { // initializer continues past this line
+                            const char* nl2 = strchr(semi, '\n');
+                            mlspan = nl2 ? (size_t)(nl2 - p) + 1 : strlen(p);
+                        }
+                        // single declarator only: a ',' outside parens means "float a=1, b;"
+                        int multi = 0, par = 0;
+                        for (const char* c = rhs; semi && c < semi; c++) {
+                            if (*c == '(') par++;
+                            else if (*c == ')') par--;
+                            else if (*c == ',' && !par) multi = 1;
+                        }
+                        if (semi && !multi && nh < 64 &&
+                            !zomdroid_rhs_is_constant(rhs, (size_t)(semi - rhs))) {
+                            // declaration without the initializer
+                            memcpy(o, q, (size_t)(ne - q));
+                            o += ne - q;
+                            *o++ = ';';
+                            *o++ = '\n';
+                            last_decl_end = (size_t)(o - out); // init function goes here
+                            // assignment, evaluated later inside the init function
+                            *h++ = ' ';
+                            *h++ = ' ';
+                            *h++ = ' ';
+                            *h++ = ' ';
+                            memcpy(h, n, (size_t)(semi - n) + 1);
+                            h += semi - n + 1;
+                            *h++ = '\n';
+                            nh++;
+                            handled = 1;
+                            if (mlspan) consume = mlspan; // swallow the whole span
+                        }
+                    }
+                }
+            }
+        }
+        if (!handled) {
+            memcpy(o, p, len);
+            o += len;
+        }
+        // brace depth / comment state for everything we just consumed
+        for (size_t i = 0; i < consume; i++) {
+            if (blockcomment) {
+                if (p[i] == '*' && i + 1 < consume && p[i + 1] == '/') {
+                    blockcomment = 0;
+                    i++;
+                }
+                continue;
+            }
+            if (p[i] == '/' && i + 1 < consume && p[i + 1] == '/') {
+                // line comment: skip to that line's end, keep tracking the rest of span
+                const char* cnl = (const char*)memchr(p + i, '\n', consume - i);
+                if (!cnl) break;
+                i = (size_t)(cnl - p);
+                continue;
+            }
+            if (p[i] == '/' && i + 1 < consume && p[i + 1] == '*') {
+                blockcomment = 1;
+                i++;
+                continue;
+            }
+            if (p[i] == '{') depth++;
+            else if (p[i] == '}' && depth > 0) depth--;
+        }
+        p += consume;
+    }
+    *o = '\0';
+    *h = '\0';
+    if (!nh) {
+        free(out);
+        free(hoist);
+        return src;
+    }
+    // Three splices, applied in offset order (main may sit ABOVE the declarations, so
+    // the call can precede the definition — that is what the prototype is for):
+    //   preamble  -> "void zomdroid_init_globals();"
+    //   last decl -> the definition carrying every hoisted initializer, in source order
+    //   main '{'  -> the call
+    const char* mb = zomdroid_find_main_brace(out);
+    if (!mb) {
+        free(out);
+        free(hoist);
+        return src;
+    }
+    static const char* zproto = "void zomdroid_init_globals();\n";
+    static const char* zcall = "\n  zomdroid_init_globals();\n";
+    size_t hl = strlen(hoist), ol = strlen(out);
+    size_t off[3] = { zomdroid_preamble_end(out), last_decl_end, (size_t)(mb - out) + 1 };
+    char* def = (char*)malloc(hl + 64);
+    if (!def) {
+        free(out);
+        free(hoist);
+        return src;
+    }
+    strcpy(def, "void zomdroid_init_globals(){\n");
+    strcat(def, hoist);
+    strcat(def, "}\n");
+    const char* txt[3] = { zproto, def, zcall };
+    for (int a = 0; a < 2; a++) // sort 3 insertions by offset (stable, tiny)
+        for (int b = 0; b < 2 - a; b++)
+            if (off[b] > off[b + 1]) {
+                size_t to = off[b];
+                const char* tt = txt[b];
+                off[b] = off[b + 1];
+                txt[b] = txt[b + 1];
+                off[b + 1] = to;
+                txt[b + 1] = tt;
+            }
+    char* fin = (char*)malloc(ol + hl + 256);
+    if (!fin) {
+        free(def);
+        free(out);
+        free(hoist);
+        return src;
+    }
+    char* f = fin;
+    size_t prev = 0;
+    for (int a = 0; a < 3; a++) {
+        memcpy(f, out + prev, off[a] - prev);
+        f += off[a] - prev;
+        size_t tl = strlen(txt[a]);
+        memcpy(f, txt[a], tl);
+        f += tl;
+        prev = off[a];
+    }
+    memcpy(f, out + prev, ol - prev + 1);
+    free(def);
+    free(out);
+    free(hoist);
+    free(src);
+    zomdroid_gltrace("HOIST %d global initializer(s) -> zomdroid_init_globals()", nh);
+    return fin;
 }
 
 // ZOMDROID FIX (Mali wave 3): textureSize() returns ivec2; PZ's visibility shader does
@@ -824,6 +1566,8 @@ void actually_deleteshader(GLuint shader) {
             kh_del(shaderlist, shaders, k);
             if (glshader->source) free(glshader->source);
             if (glshader->converted) free(glshader->converted);
+            // ZOMDROID FIX: an owned copy since the BindFragData overflow fix
+            if (glshader->before_patch) free(glshader->before_patch);
             free(glshader);
         }
     }
@@ -848,17 +1592,24 @@ void APIENTRY_GL4ES gl4es_glDeleteShader(GLuint shader) {
         noerrorShim();
         return;
     }
+    // ZOMDROID FIX (Codex audit p.4, native shader leak): forward the DRIVER deletion
+    // immediately — per spec the driver defers actual disposal while the shader is
+    // still attached. The old code skipped the driver call for attached shaders and
+    // never issued it later (the wrapper-free path has no GLES call), so every shader
+    // going through the standard attach/link/delete pattern leaked its native compiler
+    // objects for the life of the process — hundreds per session.
+    int zwas_deleted = glshader->deleted;
     glshader->deleted = 1;
     noerrorShim();
-    if (!glshader->attached) {
-        actually_deleteshader(shader);
-
-        // delete the shader in GLES2 hardware (if any)
+    if (!zwas_deleted) {
         LOAD_GLES2(glDeleteShader);
         if (gles_glDeleteShader) {
             errorGL();
             gles_glDeleteShader(shader);
         }
+    }
+    if (!glshader->attached) {
+        actually_deleteshader(shader);
     }
 }
 
@@ -883,6 +1634,8 @@ void APIENTRY_GL4ES gl4es_glCompileShader(GLuint shader) {
     glshader->compiled = 1;
     LOAD_GLES2(glCompileShader);
     if (gles_glCompileShader) {
+        struct timespec zcp0;
+        clock_gettime(CLOCK_MONOTONIC, &zcp0);
         gles_glCompileShader(glshader->id);
         errorGL();
         // if(globals4es.logshader) {
@@ -894,8 +1647,11 @@ void APIENTRY_GL4ES gl4es_glCompileShader(GLuint shader) {
             gles_glGetShaderiv(glshader->id, GL_COMPILE_STATUS, &status);
             ZOMDROID_VDBG("ZOMDROID_DBG: glCompileShader id=%d status=%d\n", glshader->id, status);
             {
+                struct timespec zcp1;
+                clock_gettime(CLOCK_MONOTONIC, &zcp1);
+                long zcpms = (zcp1.tv_sec - zcp0.tv_sec) * 1000 + (zcp1.tv_nsec - zcp0.tv_nsec) / 1000000;
                 extern void zomdroid_gltrace(const char* fmt, ...);
-                zomdroid_gltrace("COMPILE shader=%u native=%u status=%d", shader, glshader->id, status);
+                zomdroid_gltrace("COMPILE shader=%u native=%u status=%d ms=%ld", shader, glshader->id, status, zcpms);
                 if (status != GL_TRUE) {
                     // full failing source + driver log into the field-readable dump
                     FILE* zf = fopen("/data/data/com.zomdroid/files/failed_shaders.txt", "a");
@@ -1566,6 +2322,13 @@ void APIENTRY_GL4ES gl4es_glShaderSource(GLuint shader, GLsizei count, const GLc
         }
         glshader->uniforms_declarations_count = 0;
     }
+    // ZOMDROID FIX: before_patch (an owned copy since the BindFragData overflow fix)
+    // belongs to the previous source — drop it so the fallback recompile in useProgram
+    // can't feed stale text.
+    if (glshader->before_patch) {
+        free(glshader->before_patch);
+        glshader->before_patch = NULL;
+    }
     // get the size of the shader sources and than concatenate in a single string
     int l = 0;
     for (int i = 0; i < count; i++)
@@ -1594,11 +2357,23 @@ void APIENTRY_GL4ES gl4es_glShaderSource(GLuint shader, GLsizei count, const GLc
         } else if (globals4es.simple_shaderconv && !isFPEShader) {
             // ZOMDROID DIAG (Mali field debugging): breadcrumb before conversion — a crash
             // inside the converter shows as a trailing 'CONVERT begin' without 'end'.
+            struct timespec zcvt0;
+            clock_gettime(CLOCK_MONOTONIC, &zcvt0);
             {
                 extern void zomdroid_gltrace(const char* fmt, ...);
                 zomdroid_gltrace("CONVERT begin shader=%u type=0x%X len=%d", shader, glshader->type,
                                  glshader->source ? (int)strlen(glshader->source) : -1);
             }
+            size_t zcc_olen = strlen(glshader->source);
+            char* zcc_orig = (char*)malloc(zcc_olen + 1);
+            if (zcc_orig) memcpy(zcc_orig, glshader->source, zcc_olen + 1);
+            int zcc_hit = zcc_orig ? zomdroid_ccache_try(glshader, zcc_orig, zcc_olen) : 0;
+            if (zcc_hit) {
+                glshader->is_converted_essl_320 = 0;
+                extern void zomdroid_gltrace(const char* fmt, ...);
+                zomdroid_gltrace("CONVERT cached shader=%u clen=%d", shader, (int)strlen(glshader->converted));
+            }
+            if (!zcc_hit) {
             ZOMDROID_VDBG("ZOMDROID_DBG: shader=%d path=SIMPLE_SHADERCONV\n", shader);glshader->converted = strip_uniform_initializers(glshader->converted);
             // ZOMDROID FIX (invisible character): strip PZ's redefinitions of GLSL
             // builtins (max/min/clamp) — GLES3 link fails on them.
@@ -1612,6 +2387,10 @@ void APIENTRY_GL4ES gl4es_glShaderSource(GLuint shader, GLsizei count, const GLc
             glshader->source = zomdroid_floatify_float_context_lines(glshader->source);
             glshader->source = zomdroid_rename_reserved_samplers(glshader->source);
             glshader->source = zomdroid_wrap_texturesize_arith(glshader->source);
+            // wave 4: typed ivec expressions in float-vector arithmetic (see pass above)
+            glshader->source = zomdroid_vecify_ivec_arith(glshader->source);
+            // wave 5: globals initialized from uniforms (puddles/water on ANGLE/Mali)
+            glshader->source = zomdroid_hoist_global_initializers(glshader->source);
             // ZOMDROID FIX (white-world root, final link): the SIMPLE path (the one PZ
             // actually uses) stripped GLSL uniform initializers WITHOUT recording them,
             // so set_uniforms_default_value never had anything to restore (zero DEFAULT
@@ -1620,7 +2399,14 @@ void APIENTRY_GL4ES gl4es_glShaderSource(GLuint shader, GLsizei count, const GLc
                                                             &glshader->uniforms_declarations_count);
             glshader->converted = strip_texture_lod_bias(glshader->converted,
                                                          glshader->type == GL_FRAGMENT_SHADER ? 1 : 0);
-            glshader->converted = strdup(ConvertShaderConditionally(glshader));
+            // ZOMDROID FIX (Codex pre-release audit, leak): ConvertShaderConditionally
+            // stores its result in glshader->converted AND returns that same pointer —
+            // the strdup here duplicated it and leaked the stored original. The callee
+            // rebuilds from glshader->source and overwrites `converted` without freeing
+            // it, so drop the pre-call buffer too.
+            free(glshader->converted);
+            glshader->converted = NULL;
+            glshader->converted = ConvertShaderConditionally(glshader);
             // ZOMDROID FIX (invisible character, part 2): legalize PZ's GLSL-1.20-era
             // mixed int/float calls to builtins (clamp(x,0,1.0) etc.) whose custom
             // overloads we strip above. Guarded with #ifdef inside InsertExtension.
@@ -1632,10 +2418,16 @@ void APIENTRY_GL4ES gl4es_glShaderSource(GLuint shader, GLsizei count, const GLc
             }
             glshader->is_converted_essl_320 = 0;
             {
+                struct timespec zcvt1;
+                clock_gettime(CLOCK_MONOTONIC, &zcvt1);
+                long zcms = (zcvt1.tv_sec - zcvt0.tv_sec) * 1000 + (zcvt1.tv_nsec - zcvt0.tv_nsec) / 1000000;
                 extern void zomdroid_gltrace(const char* fmt, ...);
-                zomdroid_gltrace("CONVERT end shader=%u clen=%d", shader,
-                                 glshader->converted ? (int)strlen(glshader->converted) : -1);
+                zomdroid_gltrace("CONVERT end shader=%u clen=%d ms=%ld", shader,
+                                 glshader->converted ? (int)strlen(glshader->converted) : -1, zcms);
             }
+            if (zcc_orig) zomdroid_ccache_store(glshader, zcc_orig, zcc_olen);
+            } // !zcc_hit
+            free(zcc_orig);
 
         } else {
             int glsl_version = getGLSLVersion(glshader->source);
@@ -1647,7 +2439,8 @@ void APIENTRY_GL4ES gl4es_glShaderSource(GLuint shader, GLsizei count, const GLc
             //            glsl_version = 460;
             //      }
             if (glsl_version < 140 || (globals4es.es < 3 && globals4es.esversion < 300)) {
-                glshader->converted = strdup(ConvertShaderConditionally(glshader));
+                // ZOMDROID FIX: stored-and-returned pointer — the strdup leaked it
+                glshader->converted = ConvertShaderConditionally(glshader);
                 glshader->is_converted_essl_320 = 0;
             } else {
                 if (check_version_compatibility(glshader->source)) {
@@ -1676,10 +2469,12 @@ void APIENTRY_GL4ES gl4es_glShaderSource(GLuint shader, GLsizei count, const GLc
                     char* result = GLSLtoGLSLES_c(convertedSource, glshader->type, globals4es.esversion, glsl_version,
                                                   &returnCode);
                     free(convertedSource);
+                    // ZOMDROID FIX: same leak shape — both ternary arms already hand
+                    // back an owned buffer; the strdup copy leaked it
                     glshader->converted =
-                            strdup(result != NULL ? process_uniform_declarations(result, glshader->uniforms_declarations,
-                                                                                 &glshader->uniforms_declarations_count)
-                                                  : ConvertShaderConditionally(glshader));
+                            result != NULL ? process_uniform_declarations(result, glshader->uniforms_declarations,
+                                                                          &glshader->uniforms_declarations_count)
+                                           : ConvertShaderConditionally(glshader);
                     glshader->converted = process_uniform_declarations(
                             glshader->converted, glshader->uniforms_declarations, &glshader->uniforms_declarations_count);
 
@@ -1689,10 +2484,11 @@ void APIENTRY_GL4ES gl4es_glShaderSource(GLuint shader, GLsizei count, const GLc
                     int returnCode = 0; // TODO: handle returnCode
                     char* result = GLSLtoGLSLES_c(glshader->source, glshader->type, globals4es.esversion, glsl_version,
                                                   &returnCode);
+                    // ZOMDROID FIX: same leak shape as above
                     glshader->converted =
-                            strdup(result != NULL ? process_uniform_declarations(result, glshader->uniforms_declarations,
-                                                                                 &glshader->uniforms_declarations_count)
-                                                  : ConvertShaderConditionally(glshader));
+                            result != NULL ? process_uniform_declarations(result, glshader->uniforms_declarations,
+                                                                          &glshader->uniforms_declarations_count)
+                                           : ConvertShaderConditionally(glshader);
                     glshader->is_converted_essl_320 = 1;
                 }
             }
@@ -1844,16 +2640,18 @@ void redoShader(GLuint shader, shaderconv_need_t* need) {
         DBG(SHUT_LOGD("[INFO] [Shader] Shader source: "))
         DBG(SHUT_LOGD("%s", glshader->source))
         if (glsl_version < 150 || globals4es.esversion < 300) {
-            glshader->converted = strdup(ConvertShaderConditionally(glshader));
+            // ZOMDROID FIX: stored-and-returned pointer — the strdup leaked it
+            glshader->converted = ConvertShaderConditionally(glshader);
             glshader->is_converted_essl_320 = 0;
         } else {
             int returnCode = 0;
             char* result =
                     GLSLtoGLSLES_c(glshader->source, glshader->type, globals4es.esversion, glsl_version, &returnCode);
+            // ZOMDROID FIX: same leak shape — both arms hand back an owned buffer
             glshader->converted =
-                    strdup(result != NULL ? process_uniform_declarations(result, glshader->uniforms_declarations,
-                                                                         &glshader->uniforms_declarations_count)
-                                          : ConvertShaderConditionally(glshader));
+                    result != NULL ? process_uniform_declarations(result, glshader->uniforms_declarations,
+                                                                  &glshader->uniforms_declarations_count)
+                                   : ConvertShaderConditionally(glshader);
             glshader->is_converted_essl_320 = 1;
         }
         DBG(SHUT_LOGD("\n[INFO] [Shader] Converted Shader source: \n%s", glshader->converted))

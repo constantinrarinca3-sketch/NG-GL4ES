@@ -89,6 +89,7 @@ typedef struct _hardext {
     int depthclamp;     // GL_EXT_depth_clamp
     int timerquery;     // GL_EXT_disjoint_timer_query
     int drawindexed;    // GL_EXT_draw_buffers_indexed
+    int nonconstinit;   // GL_EXT_shader_non_constant_global_initializers
 } hardext_t;
 
 EXPORT extern hardext_t hardext;

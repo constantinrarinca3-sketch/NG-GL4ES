@@ -294,6 +294,9 @@ void GetHardwareExtensions(int notest) {
                   hardext.npot == 3 ? "Full" : (hardext.npot == 2 ? "Limited+Mipmap" : "Limited"));
     }
     S("GL_EXT_blend_minmax ", blendminmax, 1);
+    // ZOMDROID (wave 5): when the driver honors non-constant global initializers
+    // natively, the shader hoist pass in shader.c steps aside entirely
+    S("GL_EXT_shader_non_constant_global_initializers ", nonconstinit, 1);
     if (hardext.esversion > 2) {
         SHUT_LOGD("Extension GL_EXT_draw_buffers is in core ES3, and so used");
         hardext.drawbuffers = 1;

@@ -7,7 +7,11 @@
 #define MAX_LINE_LENGTH 2048
 #define MAX_VARIABLE_LENGTH 1024
 #define MAX_INITIAL_VALUE_LENGTH 1024
-#define MAX_UNIFORM_VARIABLE_NUMBER 1024
+// ZOMDROID FIX (Codex pre-release audit): 1024 slots made this table 2.06 MiB inside
+// EVERY shader_t and program_t — hundreds of MB of address space per session, nearly
+// all of it unused (only initializer-carrying uniforms are recorded now, and 42.20's
+// densest shader declares 37 uniforms total). UNIFTBL trace lines watch the real peak.
+#define MAX_UNIFORM_VARIABLE_NUMBER 256
 
 #define MAX_UNIFORM_TYPE_LENGTH 64
 

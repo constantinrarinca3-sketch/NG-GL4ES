@@ -357,7 +357,11 @@ char* process_uniform_declarations(char* glslCode, uniforms_declarations uniform
 
                 // ZOMDROID FIX: bound the table — entry 1024+ used to strcpy straight
                 // past the array into the rest of the owning struct and the heap.
-                if (*uniformCount >= 0 && *uniformCount < MAX_UNIFORM_VARIABLE_NUMBER) {
+                // ZOMDROID FIX (Codex pre-release audit): record ONLY uniforms carrying
+                // an initializer — set_uniforms_default_value, merge_uniforms and the
+                // conversion-cache restore all skip the rest, so initializer-less
+                // entries just burned 2112-byte slots.
+                if (initial_value[0] && *uniformCount >= 0 && *uniformCount < MAX_UNIFORM_VARIABLE_NUMBER) {
                     strcpy(uniformVector[*uniformCount].variable, name);
                     // ZOMDROID FIX: keep the declared type — set_uniforms_default_value
                     // must dispatch on it (scalar initializers like "= 1" carry no type).
@@ -365,6 +369,14 @@ char* process_uniform_declarations(char* glslCode, uniforms_declarations uniform
                     uniformVector[*uniformCount].type[MAX_UNIFORM_TYPE_LENGTH - 1] = '\0';
                     strcpy(uniformVector[*uniformCount].initial_value, initial_value);
                     (*uniformCount)++;
+                } else if (initial_value[0]) {
+                    // table full: this uniform's declared default would be silently lost
+                    extern void zomdroid_gltrace(const char* fmt, ...);
+                    static int zdrop_budget = 4;
+                    if (zdrop_budget > 0) {
+                        zdrop_budget--;
+                        zomdroid_gltrace("UNIFTBL DROP %s (cap %d)", name, MAX_UNIFORM_VARIABLE_NUMBER);
+                    }
                 }
 
                 while (*cursor && *cursor != ';')
@@ -430,6 +442,16 @@ char* process_uniform_declarations(char* glslCode, uniforms_declarations uniform
     }
 
     modifiedGlslCode[modifiedCodeIndex] = '\0';
+    // ZOMDROID DIAG (Codex pre-release audit): watch real table usage so the 1024->256
+    // cap keeps a visible safety margin.
+    {
+        extern void zomdroid_gltrace(const char* fmt, ...);
+        static int zuniftbl_peak = 0;
+        if (uniformCount && *uniformCount > zuniftbl_peak) {
+            zuniftbl_peak = *uniformCount;
+            zomdroid_gltrace("UNIFTBL peak=%d cap=%d", zuniftbl_peak, MAX_UNIFORM_VARIABLE_NUMBER);
+        }
+    }
     return modifiedGlslCode;
 }
 
@@ -437,6 +459,121 @@ char* process_uniform_declarations(char* glslCode, uniforms_declarations uniform
  * Makes more and more destructive conversions to make the shader compile
  * @return The shader as a string
  */
+// ZOMDROID PERF (preamble diet, Codex p.7): the universal preamble carried ~5.2KB
+// of 86 wrapper overloads into EVERY shader; the driver parsed them each time.
+// The fixed head stays; each wrapper family is appended ONLY when the (already
+// renamed) source actually calls it.
+static const char* ZPRE_HEAD =
+    "#version 320 es\n"
+    "#extension GL_EXT_shader_non_constant_global_initializers : enable\n"
+    "#extension GL_OES_standard_derivatives : enable\n"
+    "#extension GL_EXT_gpu_shader5 : enable\n"
+    "#extension GL_EXT_shader_implicit_conversions : enable\n"
+    "#extension GL_EXT_texture_cube_map_array : enable\n"
+    "#extension GL_EXT_texture_buffer : enable\n"
+    "#extension GL_OES_texture_storage_multisample_2d_array : enable\n"
+    "precision highp float;\n"
+    "precision highp int;\n"
+    "precision lowp sampler2D;\n"
+    "precision lowp sampler2DShadow;\n"
+    "#define sample sample2\n"
+    "#define texture2D texture\n"
+    "#define texture3D texture\n"
+    "#define texture2DProj textureProj\n"
+    "#define texture2DLod textureLod\n"
+    "#define shadow2DProj textureProj\n"
+    "#define textureSize2D textureSize\n";
+static const char* ZPRE_POW =
+    "float vgpu_pow(float x, float y) { return pow(abs(x), y); }\n"
+    "float vgpu_pow(float x, int y) { return pow(abs(x), float(y)); }\n"
+    "float vgpu_pow(int x, float y) { return pow(abs(float(x)), y); }\n"
+    "float vgpu_pow(int x, int y) { return pow(abs(float(x)), float(y)); }\n"
+    "vec2 vgpu_pow(vec2 x, vec2 y) { return pow(abs(x), y); }\n"
+    "vec3 vgpu_pow(vec3 x, vec3 y) { return pow(abs(x), y); }\n"
+    "vec4 vgpu_pow(vec4 x, vec4 y) { return pow(abs(x), y); }\n";
+static const char* ZPRE_MOD =
+    "float vgpu_mod(float x, float y) { return mod(x, y); }\n"
+    "float vgpu_mod(float x, int y) { return mod(x, float(y)); }\n"
+    "float vgpu_mod(int x, float y) { return mod(float(x), y); }\n"
+    "float vgpu_mod(int x, int y) { return mod(float(x), float(y)); }\n"
+    "vec2 vgpu_mod(vec2 x, float y) { return mod(x, y); }\n"
+    "vec3 vgpu_mod(vec3 x, float y) { return mod(x, y); }\n"
+    "vec4 vgpu_mod(vec4 x, float y) { return mod(x, y); }\n"
+    "vec2 vgpu_mod(vec2 x, vec2 y) { return mod(x, y); }\n"
+    "vec3 vgpu_mod(vec3 x, vec3 y) { return mod(x, y); }\n"
+    "vec4 vgpu_mod(vec4 x, vec4 y) { return mod(x, y); }\n";
+static const char* ZPRE_MIX =
+    "float vgpu_mix(float x, float y, float a) { return mix(x, y, a); }\n"
+    "float vgpu_mix(int x, float y, float a) { return mix(float(x), y, a); }\n"
+    "float vgpu_mix(float x, int y, float a) { return mix(x, float(y), a); }\n"
+    "float vgpu_mix(int x, int y, float a) { return mix(float(x), float(y), a); }\n"
+    "vec2 vgpu_mix(vec2 x, vec2 y, float a) { return mix(x, y, a); }\n"
+    "vec3 vgpu_mix(vec3 x, vec3 y, float a) { return mix(x, y, a); }\n"
+    "vec4 vgpu_mix(vec4 x, vec4 y, float a) { return mix(x, y, a); }\n"
+    "vec2 vgpu_mix(vec2 x, vec2 y, vec2 a) { return mix(x, y, a); }\n"
+    "vec3 vgpu_mix(vec3 x, vec3 y, vec3 a) { return mix(x, y, a); }\n"
+    "vec4 vgpu_mix(vec4 x, vec4 y, vec4 a) { return mix(x, y, a); }\n";
+static const char* ZPRE_MIN =
+    "int vgpu_min(int x, int y) { return min(x, y); }\n"
+    "float vgpu_min(float x, float y) { return min(x, y); }\n"
+    "float vgpu_min(int x, float y) { return min(float(x), y); }\n"
+    "float vgpu_min(float x, int y) { return min(x, float(y)); }\n"
+    "vec2 vgpu_min(vec2 x, vec2 y) { return min(x, y); }\n"
+    "vec2 vgpu_min(vec2 x, float y) { return min(x, y); }\n"
+    "vec3 vgpu_min(vec3 x, vec3 y) { return min(x, y); }\n"
+    "vec3 vgpu_min(vec3 x, float y) { return min(x, y); }\n"
+    "vec4 vgpu_min(vec4 x, vec4 y) { return min(x, y); }\n"
+    "vec4 vgpu_min(vec4 x, float y) { return min(x, y); }\n";
+static const char* ZPRE_MAX =
+    "int vgpu_max(int x, int y) { return max(x, y); }\n"
+    "float vgpu_max(float x, float y) { return max(x, y); }\n"
+    "float vgpu_max(int x, float y) { return max(float(x), y); }\n"
+    "float vgpu_max(float x, int y) { return max(x, float(y)); }\n"
+    "vec2 vgpu_max(vec2 x, vec2 y) { return max(x, y); }\n"
+    "vec2 vgpu_max(vec2 x, float y) { return max(x, y); }\n"
+    "vec3 vgpu_max(vec3 x, vec3 y) { return max(x, y); }\n"
+    "vec3 vgpu_max(vec3 x, float y) { return max(x, y); }\n"
+    "vec4 vgpu_max(vec4 x, vec4 y) { return max(x, y); }\n"
+    "vec4 vgpu_max(vec4 x, float y) { return max(x, y); }\n";
+static const char* ZPRE_SMOOTH =
+    "float smoothstep_vgpu(float x, float y, float a) { return smoothstep(x, y, a); }\n"
+    "float smoothstep_vgpu(int x, float y, float a) { return smoothstep(float(x), y, a); }\n"
+    "float smoothstep_vgpu(float x, int y, float a) { return smoothstep(x, float(y), a); }\n"
+    "float smoothstep_vgpu(int x, int y, float a) { return smoothstep(float(x), float(y), a); }\n"
+    "vec2 smoothstep_vgpu(float x, float y, vec2 a) { return smoothstep(x, y, a); }\n"
+    "vec2 smoothstep_vgpu(int x, float y, vec2 a) { return smoothstep(float(x), y, a); }\n"
+    "vec2 smoothstep_vgpu(float x, int y, vec2 a) { return smoothstep(x, float(y), a); }\n"
+    "vec2 smoothstep_vgpu(int x, int y, vec2 a) { return smoothstep(float(x), float(y), a); }\n"
+    "vec3 smoothstep_vgpu(float x, float y, vec3 a) { return smoothstep(x, y, a); }\n"
+    "vec3 smoothstep_vgpu(int x, float y, vec3 a) { return smoothstep(float(x), y, a); }\n"
+    "vec3 smoothstep_vgpu(float x, int y, vec3 a) { return smoothstep(x, float(y), a); }\n"
+    "vec3 smoothstep_vgpu(int x, int y, vec3 a) { return smoothstep(float(x), float(y), a); }\n"
+    "vec4 smoothstep_vgpu(float x, float y, vec4 a) { return smoothstep(x, y, a); }\n"
+    "vec4 smoothstep_vgpu(int x, float y, vec4 a) { return smoothstep(float(x), y, a); }\n"
+    "vec4 smoothstep_vgpu(float x, int y, vec4 a) { return smoothstep(x, float(y), a); }\n"
+    "vec4 smoothstep_vgpu(int x, int y, vec4 a) { return smoothstep(float(x), float(y), a); }\n";
+static const char* ZPRE_STEP =
+    "float vgpu_step(float x, float y) { return step(x, y); }\n"
+    "float vgpu_step(int x, float y) { return step(float(x), y); }\n"
+    "float vgpu_step(float x, int y) { return step(x, float(y)); }\n"
+    "float vgpu_step(int x, int y) { return step(float(x), float(y)); }\n"
+    "vec2 vgpu_step(float x, vec2 y) { return step(x, y); }\n"
+    "vec2 vgpu_step(int x, vec2 y) { return step(float(x), y); }\n"
+    "vec2 vgpu_step(vec2 x, vec2 y) { return step(x, y); }\n"
+    "vec3 vgpu_step(float x, vec3 y) { return step(x, y); }\n"
+    "vec3 vgpu_step(int x, vec3 y) { return step(float(x), y); }\n"
+    "vec3 vgpu_step(vec3 x, vec3 y) { return step(x, y); }\n"
+    "vec4 vgpu_step(float x, vec4 y) { return step(x, y); }\n"
+    "vec4 vgpu_step(int x, vec4 y) { return step(float(x), y); }\n"
+    "vec4 vgpu_step(vec4 x, vec4 y) { return step(x, y); }\n";
+static const char* ZPRE_EXP2 =
+    "float vgpu_exp2(float x) { return exp2(x); }\n"
+    "float vgpu_exp2(int x) { return exp2(float(x)); }\n";
+static const char* ZPRE_TEXSZ =
+    "vec2 vgpu_textureSize2D(sampler2D zsmp, int level) { return vec2(textureSize(zsmp, level)); }\n";
+static const char* ZPRE_SHADOW =
+    "vec4 vgpu_shadow2DProj(sampler2DShadow zsmp, vec4 uv) { return vec4(textureProj(zsmp, uv)); }\n";
+
 char* ConvertShaderConditionally(struct shader_s* shader_source) {
     int shaderCompileStatus;
 
@@ -539,107 +676,25 @@ int sourceLengthaaa = strlen(shader_source->source) + 1;
             source = InplaceReplaceSimple(source, &sourceLength, "uniform bool useDiffuseMapForShadowAlpha = true;", "uniform bool useDiffuseMapForShadowAlpha;");
         }
 
-        source = InplaceReplaceSimple(source, &sourceLength, "#version 120",
-"#version 320 es\n\
-#extension GL_EXT_shader_non_constant_global_initializers : enable\n\
-#extension GL_OES_standard_derivatives : enable\n\
-#extension GL_EXT_gpu_shader5 : enable\n\
-#extension GL_EXT_shader_implicit_conversions : enable\n\
-#extension GL_EXT_texture_cube_map_array : enable\n\
-#extension GL_EXT_texture_buffer : enable\n\
-#extension GL_OES_texture_storage_multisample_2d_array : enable\n\
-precision highp float;\n\
-precision highp int;\n\
-precision lowp sampler2D;\n\
-precision lowp sampler2DShadow;\n\
-#define sample sample2\n\
-#define texture2D texture\n\
-#define texture3D texture\n\
-#define texture2DProj textureProj\n\
-#define texture2DLod textureLod\n\
-#define shadow2DProj textureProj\n\
-#define textureSize2D textureSize\n\
-float vgpu_pow(float x, float y) { return pow(abs(x), y); }\n\
-float vgpu_pow(float x, int y) { return pow(abs(x), float(y)); }\n\
-float vgpu_pow(int x, float y) { return pow(abs(float(x)), y); }\n\
-float vgpu_pow(int x, int y) { return pow(abs(float(x)), float(y)); }\n\
-vec2 vgpu_pow(vec2 x, vec2 y) { return pow(abs(x), y); }\n\
-vec3 vgpu_pow(vec3 x, vec3 y) { return pow(abs(x), y); }\n\
-vec4 vgpu_pow(vec4 x, vec4 y) { return pow(abs(x), y); }\n\
-float vgpu_mod(float x, float y) { return mod(x, y); }\n\
-float vgpu_mod(float x, int y) { return mod(x, float(y)); }\n\
-float vgpu_mod(int x, float y) { return mod(float(x), y); }\n\
-float vgpu_mod(int x, int y) { return mod(float(x), float(y)); }\n\
-vec2 vgpu_mod(vec2 x, float y) { return mod(x, y); }\n\
-vec3 vgpu_mod(vec3 x, float y) { return mod(x, y); }\n\
-vec4 vgpu_mod(vec4 x, float y) { return mod(x, y); }\n\
-vec2 vgpu_mod(vec2 x, vec2 y) { return mod(x, y); }\n\
-vec3 vgpu_mod(vec3 x, vec3 y) { return mod(x, y); }\n\
-vec4 vgpu_mod(vec4 x, vec4 y) { return mod(x, y); }\n\
-float vgpu_mix(float x, float y, float a) { return mix(x, y, a); }\n\
-float vgpu_mix(int x, float y, float a) { return mix(float(x), y, a); }\n\
-float vgpu_mix(float x, int y, float a) { return mix(x, float(y), a); }\n\
-float vgpu_mix(int x, int y, float a) { return mix(float(x), float(y), a); }\n\
-vec2 vgpu_mix(vec2 x, vec2 y, float a) { return mix(x, y, a); }\n\
-vec3 vgpu_mix(vec3 x, vec3 y, float a) { return mix(x, y, a); }\n\
-vec4 vgpu_mix(vec4 x, vec4 y, float a) { return mix(x, y, a); }\n\
-vec2 vgpu_mix(vec2 x, vec2 y, vec2 a) { return mix(x, y, a); }\n\
-vec3 vgpu_mix(vec3 x, vec3 y, vec3 a) { return mix(x, y, a); }\n\
-vec4 vgpu_mix(vec4 x, vec4 y, vec4 a) { return mix(x, y, a); }\n\
-int vgpu_min(int x, int y) { return min(x, y); }\n\
-float vgpu_min(float x, float y) { return min(x, y); }\n\
-float vgpu_min(int x, float y) { return min(float(x), y); }\n\
-float vgpu_min(float x, int y) { return min(x, float(y)); }\n\
-vec2 vgpu_min(vec2 x, vec2 y) { return min(x, y); }\n\
-vec2 vgpu_min(vec2 x, float y) { return min(x, y); }\n\
-vec3 vgpu_min(vec3 x, vec3 y) { return min(x, y); }\n\
-vec3 vgpu_min(vec3 x, float y) { return min(x, y); }\n\
-vec4 vgpu_min(vec4 x, vec4 y) { return min(x, y); }\n\
-vec4 vgpu_min(vec4 x, float y) { return min(x, y); }\n\
-int vgpu_max(int x, int y) { return max(x, y); }\n\
-float vgpu_max(float x, float y) { return max(x, y); }\n\
-float vgpu_max(int x, float y) { return max(float(x), y); }\n\
-float vgpu_max(float x, int y) { return max(x, float(y)); }\n\
-vec2 vgpu_max(vec2 x, vec2 y) { return max(x, y); }\n\
-vec2 vgpu_max(vec2 x, float y) { return max(x, y); }\n\
-vec3 vgpu_max(vec3 x, vec3 y) { return max(x, y); }\n\
-vec3 vgpu_max(vec3 x, float y) { return max(x, y); }\n\
-vec4 vgpu_max(vec4 x, vec4 y) { return max(x, y); }\n\
-vec4 vgpu_max(vec4 x, float y) { return max(x, y); }\n\
-float smoothstep_vgpu(float x, float y, float a) { return smoothstep(x, y, a); }\n\
-float smoothstep_vgpu(int x, float y, float a) { return smoothstep(float(x), y, a); }\n\
-float smoothstep_vgpu(float x, int y, float a) { return smoothstep(x, float(y), a); }\n\
-float smoothstep_vgpu(int x, int y, float a) { return smoothstep(float(x), float(y), a); }\n\
-vec2 smoothstep_vgpu(float x, float y, vec2 a) { return smoothstep(x, y, a); }\n\
-vec2 smoothstep_vgpu(int x, float y, vec2 a) { return smoothstep(float(x), y, a); }\n\
-vec2 smoothstep_vgpu(float x, int y, vec2 a) { return smoothstep(x, float(y), a); }\n\
-vec2 smoothstep_vgpu(int x, int y, vec2 a) { return smoothstep(float(x), float(y), a); }\n\
-vec3 smoothstep_vgpu(float x, float y, vec3 a) { return smoothstep(x, y, a); }\n\
-vec3 smoothstep_vgpu(int x, float y, vec3 a) { return smoothstep(float(x), y, a); }\n\
-vec3 smoothstep_vgpu(float x, int y, vec3 a) { return smoothstep(x, float(y), a); }\n\
-vec3 smoothstep_vgpu(int x, int y, vec3 a) { return smoothstep(float(x), float(y), a); }\n\
-vec4 smoothstep_vgpu(float x, float y, vec4 a) { return smoothstep(x, y, a); }\n\
-vec4 smoothstep_vgpu(int x, float y, vec4 a) { return smoothstep(float(x), y, a); }\n\
-vec4 smoothstep_vgpu(float x, int y, vec4 a) { return smoothstep(x, float(y), a); }\n\
-vec4 smoothstep_vgpu(int x, int y, vec4 a) { return smoothstep(float(x), float(y), a); }\n\
-float vgpu_step(float x, float y) { return step(x, y); }\n\
-float vgpu_step(int x, float y) { return step(float(x), y); }\n\
-float vgpu_step(float x, int y) { return step(x, float(y)); }\n\
-float vgpu_step(int x, int y) { return step(float(x), float(y)); }\n\
-vec2 vgpu_step(float x, vec2 y) { return step(x, y); }\n\
-vec2 vgpu_step(int x, vec2 y) { return step(float(x), y); }\n\
-vec2 vgpu_step(vec2 x, vec2 y) { return step(x, y); }\n\
-vec3 vgpu_step(float x, vec3 y) { return step(x, y); }\n\
-vec3 vgpu_step(int x, vec3 y) { return step(float(x), y); }\n\
-vec3 vgpu_step(vec3 x, vec3 y) { return step(x, y); }\n\
-vec4 vgpu_step(float x, vec4 y) { return step(x, y); }\n\
-vec4 vgpu_step(int x, vec4 y) { return step(float(x), y); }\n\
-vec4 vgpu_step(vec4 x, vec4 y) { return step(x, y); }\n\
-float vgpu_exp2(float x) { return exp2(x); }\n\
-float vgpu_exp2(int x) { return exp2(float(x)); }\n\
-vec2 vgpu_textureSize2D(sampler2D zsmp, int level) { return vec2(textureSize(zsmp, level)); }\n\
-vec4 vgpu_shadow2DProj(sampler2DShadow zsmp, vec4 uv) { return vec4(textureProj(zsmp, uv)); }\n\
-");
+        {
+            char zpre[8192];
+            size_t zoff = 0;
+#define ZPRE_ADD(S) do { size_t zl = strlen(S); if (zoff + zl < sizeof(zpre)) { memcpy(zpre + zoff, (S), zl); zoff += zl; } } while (0)
+            ZPRE_ADD(ZPRE_HEAD);
+            if (strstr(source, "vgpu_pow(")) ZPRE_ADD(ZPRE_POW);
+            if (strstr(source, "vgpu_mod(")) ZPRE_ADD(ZPRE_MOD);
+            if (strstr(source, "vgpu_mix(")) ZPRE_ADD(ZPRE_MIX);
+            if (strstr(source, "vgpu_min(")) ZPRE_ADD(ZPRE_MIN);
+            if (strstr(source, "vgpu_max(")) ZPRE_ADD(ZPRE_MAX);
+            if (strstr(source, "smoothstep_vgpu(")) ZPRE_ADD(ZPRE_SMOOTH);
+            if (strstr(source, "vgpu_step(")) ZPRE_ADD(ZPRE_STEP);
+            if (strstr(source, "vgpu_exp2(")) ZPRE_ADD(ZPRE_EXP2);
+            if (strstr(source, "vgpu_textureSize2D(")) ZPRE_ADD(ZPRE_TEXSZ);
+            if (strstr(source, "vgpu_shadow2DProj(")) ZPRE_ADD(ZPRE_SHADOW);
+#undef ZPRE_ADD
+            zpre[zoff] = '\0';
+            source = InplaceReplaceSimple(source, &sourceLength, "#version 120", zpre);
+        }
 
         shader_source->converted = source;
 

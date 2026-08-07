@@ -1,4 +1,5 @@
 #include "program.h"
+#include <time.h>
 
 #include <stdlib.h>
 #include <string.h>
@@ -34,8 +35,16 @@ void VISIBLE glBindFragDataLocation(GLuint program, GLuint colorNumber, const GL
     FLUSH_BEGINEND;
     CHECK_PROGRAM(void, program)
     if (glprogram->last_frag) {
-        if (!glprogram->last_frag->before_patch) {
-            glprogram->last_frag->before_patch = glprogram->last_frag->converted;
+        // ZOMDROID DIAG (Codex pre-release audit): this path used to overflow the heap
+        // (see below) and only runs under the 3.1 badge — the crumb tells us whether it
+        // is involved in the 42.20 memory crashes.
+        zomdroid_gltrace("BINDFRAGDATA program=%u color=%u name=%s", program, colorNumber, name);
+        // ZOMDROID FIX: before_patch must be a real copy. It aliased `converted`, which
+        // was patched in place below — so the fallback recompile in useProgram received
+        // the PATCHED text, and the buffer swap in the overflow fix would leave the
+        // alias dangling.
+        if (!glprogram->last_frag->before_patch && glprogram->last_frag->converted) {
+            glprogram->last_frag->before_patch = strdup(glprogram->last_frag->converted);
         }
         DBG(SHUT_LOGD("Target shader:\n%s\n", glprogram->last_frag->converted))
         int len = strlen(name);
@@ -96,14 +105,19 @@ void VISIBLE glBindFragDataLocation(GLuint program, GLuint colorNumber, const GL
                 strcat(newConverted, result);
                 strcat(newConverted, temp + matchLen);
 
-                strcpy(glprogram->last_frag->converted, newConverted);
-                free(newConverted);
+                // ZOMDROID FIX (Codex pre-release audit): newConverted is LONGER than
+                // the old allocation ("layout (location = N) " prefix), so the strcpy
+                // back into it overflowed the heap by ~22 bytes per replacement. Swap
+                // the buffers and resume the scan after the inserted text.
+                free(glprogram->last_frag->converted);
+                glprogram->last_frag->converted = newConverted;
+                searchStart = newConverted + prefixLen + strlen(result);
+            } else {
+                searchStart += pmatch[0].rm_eo;
             }
 
             free(origin);
             free(result);
-
-            searchStart += pmatch[0].rm_eo;
         }
 
         regfree(&regex);
@@ -1071,14 +1085,19 @@ void APIENTRY_GL4ES gl4es_glLinkProgram(GLuint program) {
         GLint attached = 0;
         gles_glGetProgramiv(glprogram->id, GL_ATTACHED_SHADERS, &attached);
         ZOMDROID_VDBG("ZOMDROID_DBG: GPU attached shaders=%d\n", attached);
+        struct timespec zlk0;
+        clock_gettime(CLOCK_MONOTONIC, &zlk0);
         gles_glLinkProgram(glprogram->id);
         GLenum err = gles_glGetError();
         // Get Link Status
         gles_glGetProgramiv(glprogram->id, GL_LINK_STATUS, &glprogram->linked);
+        struct timespec zlk1;
+        clock_gettime(CLOCK_MONOTONIC, &zlk1);
+        long zlkms = (zlk1.tv_sec - zlk0.tv_sec) * 1000 + (zlk1.tv_nsec - zlk0.tv_nsec) / 1000000;
         ZOMDROID_VDBG("ZOMDROID_DBG: glLinkProgram id=%d linked=%d\n", glprogram->id, glprogram->linked);
         {
             extern void zomdroid_gltrace(const char* fmt, ...);
-            zomdroid_gltrace("LINK prog=%u linked=%d", program, glprogram->linked);
+            zomdroid_gltrace("LINK prog=%u linked=%d ms=%ld", program, glprogram->linked, zlkms);
         }
         if (glprogram->linked) {
             // ZOMDROID FIX (white-world root, part 2): set_uniforms_default_value ran
