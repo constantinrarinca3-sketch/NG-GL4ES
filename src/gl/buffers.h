@@ -16,7 +16,12 @@ typedef struct {
     int mapped;
     int ranged;
     // ZOMDROID NATIVE MAP: this mapping is a real driver pointer, not the shadow;
-    // unmap/flush must go native and skip the SubData re-upload
+    // unmap/flush must go native and skip the SubData re-upload.
+    // 0 = shadow, 1 = ES3 core glMapBufferRange, 2 = GL_OES_mapbuffer.
+    // The KIND matters: eglGetProcAddress hands back a core glUnmapBuffer address even
+    // on an ES2 context (libGLESv3 is loaded process-wide), so unmapping an OES map
+    // with the core entry point would be an illegal call on exactly the Mali devices
+    // this path exists for. Always pair map and unmap from the same extension.
     int native_mapped;
     GLintptr offset;
     GLsizeiptr length;

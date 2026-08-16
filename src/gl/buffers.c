@@ -567,13 +567,28 @@ GLboolean APIENTRY_GL4ES gl4es_glUnmapBuffer(GLenum target) {
     noerrorShim();
 
     // ZOMDROID NATIVE MAP: the pointer came from the driver — unmap natively and
-    // skip both SubData re-uploads below (the shadow was never written).
+    // skip both SubData re-uploads below (the shadow was never written). The OES leg
+    // (ES2/Mali) exposes only glUnmapBufferOES, so resolve that when core is absent.
     if (buff->native_mapped) {
-        LOAD_GLES3(glUnmapBuffer);
+        GLboolean (*zunmap)(GLenum) = NULL;
+        if (buff->native_mapped == 2) {
+            // OES map: unmap through the SAME extension, never the core entry point
+            static GLboolean (*zunmapoes)(GLenum) = NULL;
+            static int zunmapoes_init = 0;
+            if (!zunmapoes_init) {
+                zunmapoes_init = 1;
+                LOAD_EGL(eglGetProcAddress);
+                zunmapoes = (GLboolean(*)(GLenum))egl_eglGetProcAddress("glUnmapBufferOES");
+            }
+            zunmap = zunmapoes;
+        } else {
+            LOAD_GLES3(glUnmapBuffer);
+            zunmap = gles_glUnmapBuffer;
+        }
         GLboolean znr = GL_TRUE;
-        if (gles_glUnmapBuffer) {
+        if (zunmap) {
             bindBuffer(buff->type, buff->real_buffer);
-            znr = gles_glUnmapBuffer(buff->type);
+            znr = zunmap(buff->type);
         }
         buff->native_mapped = 0;
         buff->mapped = 0;
@@ -607,15 +622,28 @@ GLboolean APIENTRY_GL4ES gl4es_glUnmapBuffer(GLenum target) {
         buff->mapped && buff->ranged && (buff->access & GL_MAP_WRITE_BIT_EXT) &&
         !(buff->access & GL_MAP_FLUSH_EXPLICIT_BIT_EXT)) {
         LOAD_GLES(glBufferSubData);
+        LOAD_GLES(glBufferData);
         bindBuffer(buff->type, buff->real_buffer);
         {
             struct timespec zt0, zt1;
             clock_gettime(CLOCK_MONOTONIC, &zt0);
-            gles_glBufferSubData(buff->type, buff->offset, buff->length, (void*)((uintptr_t)buff->data + buff->offset));
+            // ZOMDROID EBO ORPHAN (Codex minimap audit): a FULL-range INVALIDATE update
+            // re-specifies the store instead of SubData-ing into a possibly in-flight
+            // buffer, so the driver stops synchronizing against the previous frame.
+            // The shadow stays authoritative — the emulated draw paths read indices
+            // from it, which is exactly why EBOs cannot take the native-map leg.
+            if (buff->type == GL_ELEMENT_ARRAY_BUFFER && buff->offset == 0 &&
+                (GLsizeiptr)buff->length == buff->size && (buff->access & GL_MAP_INVALIDATE_BUFFER_BIT_EXT))
+                gles_glBufferData(buff->type, buff->size, buff->data, buff->usage);
+            else
+                gles_glBufferSubData(buff->type, buff->offset, buff->length,
+                                     (void*)((uintptr_t)buff->data + buff->offset));
             clock_gettime(CLOCK_MONOTONIC, &zt1);
             long zms = (zt1.tv_sec - zt0.tv_sec) * 1000 + (zt1.tv_nsec - zt0.tv_nsec) / 1000000;
             extern void zomdroid_slowsub(const char*, long, long, unsigned);
-            if (zms >= 3) zomdroid_slowsub("unmap-ranged", zms, (long)buff->length, buff->buffer);
+            if (zms >= 3)
+                zomdroid_slowsub(buff->type == GL_ELEMENT_ARRAY_BUFFER ? "unmap-ranged-EBO" : "unmap-ranged-VBO", zms,
+                                 (long)buff->length, buff->buffer);
         }
     }
     if (buff->mapped) {
@@ -811,7 +839,7 @@ void* APIENTRY_GL4ES gl4es_glMapBufferRange(GLenum target, GLintptr offset, GLsi
                     buff->access = access;
                     buff->mapped = 1;
                     buff->ranged = 1;
-                    buff->native_mapped = 1;
+                    buff->native_mapped = 1; // ES3 core map
                     buff->offset = offset;
                     buff->length = length;
                     static int znlog = 0;
@@ -825,6 +853,51 @@ void* APIENTRY_GL4ES gl4es_glMapBufferRange(GLenum target, GLintptr offset, GLsi
                     return znp;
                 }
                 // driver refused (context/flags) — fall through to the shadow path
+            }
+        }
+        // ES2/Mali leg (Codex minimap audit 2026-08-11): GL_OES_mapbuffer maps the
+        // WHOLE buffer write-only — and our traces show PZ maps offset=0 for the full
+        // size, so the common stream fits. INVALIDATE_BUFFER orphans first (the only
+        // way ES2 can honor it); the driver then hands back fresh storage instead of
+        // synchronizing against in-flight frames. This is the leg Mali was missing —
+        // the ES3 fast path above never fires on its 2.x context.
+        // GL_OES_mapbuffer maps the WHOLE buffer and has no range-flush counterpart,
+        // so an explicit-flush map must stay on the shadow path.
+        if (znm && target == GL_ARRAY_BUFFER && buff->real_buffer && globals4es.esversion < 300 &&
+            hardext.mapbuffer && offset == 0 && (GLsizeiptr)length == buff->size &&
+            (access & GL_MAP_WRITE_BIT_EXT) && !(access & GL_MAP_READ_BIT_EXT) &&
+            !(access & GL_MAP_FLUSH_EXPLICIT_BIT_EXT)) {
+            // no *_PTR typedef exists for the OES-only entry point — resolve by hand
+            static void* (*zmapoes)(GLenum, GLenum) = NULL;
+            static int zmapoes_init = 0;
+            if (!zmapoes_init) {
+                zmapoes_init = 1;
+                LOAD_EGL(eglGetProcAddress);
+                zmapoes = (void* (*)(GLenum, GLenum))egl_eglGetProcAddress("glMapBufferOES");
+            }
+            LOAD_GLES(glBufferData);
+            if (zmapoes) {
+                bindBuffer(target, buff->real_buffer);
+                if (access & GL_MAP_INVALIDATE_BUFFER_BIT_EXT)
+                    gles_glBufferData(target, buff->size, NULL, buff->usage);
+                void* znp = zmapoes(target, GL_WRITE_ONLY_OES);
+                if (znp) {
+                    buff->access = access;
+                    buff->mapped = 1;
+                    buff->ranged = 1;
+                    buff->native_mapped = 2; // OES map — unmap MUST use glUnmapBufferOES
+                    buff->offset = 0;
+                    buff->length = length;
+                    static int znolog = 0;
+                    if (znolog < 3) {
+                        znolog++;
+                        extern void zomdroid_gltrace(const char* fmt, ...);
+                        zomdroid_gltrace("NATIVEMAP-OES buf=%u len=%ld access=0x%x", buff->buffer, (long)length,
+                                         access);
+                    }
+                    noerrorShim();
+                    return znp;
+                }
             }
         }
     }
@@ -858,12 +931,17 @@ void APIENTRY_GL4ES gl4es_glFlushMappedBufferRange(GLenum target, GLintptr offse
         return;
     }
 
-    // ZOMDROID NATIVE MAP: flush through the driver, nothing to copy ourselves
+    // ZOMDROID NATIVE MAP: flush through the driver, nothing to copy ourselves.
+    // Only the ES3 core map has a range flush; the OES leg refuses explicit-flush
+    // maps at map time, so reaching here with kind 2 means the whole buffer is
+    // already in driver storage and there is nothing to do.
     if (buff->native_mapped) {
-        LOAD_GLES3(glFlushMappedBufferRange);
-        if (gles_glFlushMappedBufferRange) {
-            bindBuffer(buff->type, buff->real_buffer);
-            gles_glFlushMappedBufferRange(buff->type, offset, length);
+        if (buff->native_mapped == 1) {
+            LOAD_GLES3(glFlushMappedBufferRange);
+            if (gles_glFlushMappedBufferRange) {
+                bindBuffer(buff->type, buff->real_buffer);
+                gles_glFlushMappedBufferRange(buff->type, offset, length);
+            }
         }
         noerrorShim();
         return;

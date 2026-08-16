@@ -2,6 +2,7 @@
 #include "init.h"
 #include <stdarg.h>
 #include <stdlib.h>
+#include <string.h>
 #if defined(ANDROID) && defined(USE_ANDROID_LOG)
 #include <android/log.h>
 #endif
@@ -58,14 +59,24 @@ void zomdroid_gltrace(const char* fmt, ...) {
     static int init = 0;
     static int count = 0;
     if (count > 12000) return;
-    if (!init) { init = 1; f = fopen("/data/data/com.zomdroid/files/gl_trace.txt", "w"); }
+    if (!init) {
+        init = 1;
+        f = fopen("/data/data/com.zomdroid/files/gl_trace.txt", "w");
+        // ZOMDROID (Codex minimap audit): a flush per line turned load-time CONVERT
+        // bursts into syscall storms. Buffer the file; flush only the lines whose
+        // survival matters at crash time — everything else also mirrors to stderr,
+        // which the launcher captures independently.
+        if (f) setvbuf(f, NULL, _IOFBF, 16384);
+    }
     if (f) {
         va_list args;
         va_start(args, fmt);
         vfprintf(f, fmt, args);
         va_end(args);
         fputc('\n', f);
-        fflush(f);
+        if (!strncmp(fmt, "INIT", 4) || !strncmp(fmt, "MEMSTAT", 7) || !strncmp(fmt, "EXIT", 4) ||
+            !strncmp(fmt, "GLALLOC exit", 12) || !strncmp(fmt, "CCACHE", 6) || !strncmp(fmt, "FBO", 3))
+            fflush(f);
     }
     // ZOMDROID DIAG: mirror to stderr — it lands in the console log that testers can
     // export from Zomdroid WITHOUT adb (and it works even if the file open failed).
@@ -218,8 +229,11 @@ void zomdroid_glalloc_cum(int cat, long bytes) {
 // shows up in the log, the death is a plain exit() inside emulated code (box64 territory).
 static void zomdroid_exit_probe(void) {
     extern int zccache_hits, zccache_miss;
+    extern long zomdroid_fbo_bind_app, zomdroid_fbo_bind_native, zomdroid_clearbuf_native;
     zomdroid_memstat_tag("exit");
     zga_report("exit");
+    zomdroid_gltrace("FBO session: binds app=%ld native=%ld clearbuf-native=%ld", zomdroid_fbo_bind_app,
+                     zomdroid_fbo_bind_native, zomdroid_clearbuf_native);
     zomdroid_gltrace("CCACHE session: hits=%d miss=%d", zccache_hits, zccache_miss);
     zomdroid_gltrace("EXIT-PROBE: process exiting via exit(), not a signal kill");
 }

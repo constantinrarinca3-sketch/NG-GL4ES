@@ -117,6 +117,15 @@ void APIENTRY_GL4ES gl4es_glGenFramebuffers(GLsizei n, GLuint* ids) {
     }
 }
 
+// ZOMDROID FBO BIND DIET (Codex minimap audit 2026-08-11): session counters the exit
+// probe reports. NOTE: a same-FBO rebind dedup cache was tried and REMOVED — a dozen
+// sites (fpe.c TexGen path, blit, ReadDraw_Push, glGetTexImage scratch) call
+// gles_glBindFramebuffer directly, so any wrapper-side cache goes stale and would
+// eventually skip a REQUIRED rebind. Dedup needs those sites funneled first.
+long zomdroid_fbo_bind_app = 0;    // app-level glBindFramebuffer calls
+long zomdroid_fbo_bind_native = 0; // native binds actually issued
+long zomdroid_clearbuf_native = 0; // native glClearBuffer* fast-path uses
+
 void APIENTRY_GL4ES gl4es_glDeleteFramebuffers(GLsizei n, GLuint* framebuffers) {
     DBG(SHUT_LOGD("glDeleteFramebuffers(%i, %p), framebuffers[0]=%u\n", n, framebuffers, framebuffers[0]);)
     // delete tracking
@@ -222,18 +231,16 @@ void APIENTRY_GL4ES gl4es_glBindFramebuffer(GLenum target, GLuint framebuffer) {
     DBG(SHUT_LOGD("glBindFramebuffer(%s, %u), list=%s, glstate->fbo.current_fb=%d (draw=%d, read=%d)\n",
                   PrintEnum(target), framebuffer, glstate->list.active ? "active" : "none", glstate->fbo.current_fb->id,
                   glstate->fbo.fbo_draw->id, glstate->fbo.fbo_read->id);)
-    if (target == GL_FRAMEBUFFER) {
-        gl4es_glBindFramebuffer(GL_FRAMEBUFFER - 1, framebuffer);
-        gl4es_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer);
-        gl4es_glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer);
-        return;
-    }
-
-    if (target == GL_FRAMEBUFFER - 1) ++target;
-
+    zomdroid_fbo_bind_app++;
+    // ZOMDROID FBO BIND DIET (Codex minimap audit 2026-08-11): GL_FRAMEBUFFER used to
+    // expand into THREE recursive calls, each issuing its own native bind PLUS an
+    // unconditional glGetError — a sync-prone driver round-trip per call, tripled, on
+    // a path the minimap hits constantly. Now: one pass over the wrapper state, ONE
+    // native bind, and glGetError only runs when noerror is off. (Same-FBO dedup was
+    // tried and dropped — see the note above the counters.) The READ view keeps its
+    // historic cached-COMPLETE semantics.
     PUSH_IF_COMPILING(glBindFramebuffer);
     LOAD_GLES2_OR_OES(glBindFramebuffer);
-    //    LOAD_GLES2_OR_OES(glCheckFramebufferStatus);
     LOAD_GLES(glGetError);
 
     glframebuffer_t* fb = find_framebuffer(framebuffer);
@@ -245,36 +252,31 @@ void APIENTRY_GL4ES gl4es_glBindFramebuffer(GLenum target, GLuint framebuffer) {
     if (target == GL_FRAMEBUFFER) {
         glstate->fbo.fbo_read = fb;
         glstate->fbo.fbo_draw = fb;
-    }
-
-    if (target == GL_READ_FRAMEBUFFER) {
-        glstate->fbo.fbo_read = fb;
-        noerrorShim();
         glstate->fbo.fb_status = GL_FRAMEBUFFER_COMPLETE;
         glstate->fbo.internal = 1;
-        //        return;    //don't bind for now
-    } else
-        glstate->fbo.internal = 0;
-
-    if (target == GL_DRAW_FRAMEBUFFER) {
-        // target = GL_FRAMEBUFFER;
+    } else if (target == GL_READ_FRAMEBUFFER) {
+        glstate->fbo.fbo_read = fb;
+        glstate->fbo.fb_status = GL_FRAMEBUFFER_COMPLETE;
+        glstate->fbo.internal = 1;
+    } else if (target == GL_DRAW_FRAMEBUFFER) {
         glstate->fbo.fbo_draw = fb;
+        glstate->fbo.internal = 0;
+    } else {
+        errorShim(GL_INVALID_ENUM);
+        return;
     }
 
-    //    if (target != GL_FRAMEBUFFER) {
-    //        errorShim(GL_INVALID_ENUM);
-    //        return;
-    //    }
-
-    if (framebuffer == 0) framebuffer = glstate->fbo.mainfbo_fbo;
-
+    GLuint znative = framebuffer ? framebuffer : glstate->fbo.mainfbo_fbo;
     glstate->fbo.current_fb = fb;
 
-    gles_glBindFramebuffer(target, framebuffer);
-    GLenum err = gles_glGetError();
-    errorShim(err);
-
-    //    glstate->fbo.fb_status = (framebuffer==0)?GL_FRAMEBUFFER_COMPLETE:gles_glCheckFramebufferStatus(target);
+    gles_glBindFramebuffer(target, znative);
+    zomdroid_fbo_bind_native++;
+    if (!globals4es.noerror) {
+        GLenum err = gles_glGetError();
+        errorShim(err);
+        return;
+    }
+    noerrorShim();
 }
 
 GLenum ReadDraw_Push(GLenum target) {
@@ -1590,11 +1592,14 @@ void gl4es_setCurrentFBO() {
 
 void APIENTRY_GL4ES gl4es_glDrawBuffer(GLenum buffer) {
     DBG(SHUT_LOGD("glDrawBuffer, %s", PrintEnum(buffer));)
-    LOAD_GLES(glGetIntegerv)
     LOAD_GLES3(glDrawBuffers)
 
-    GLint currentFBO;
-    gles_glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &currentFBO);
+    // ZOMDROID (Codex minimap audit): both values were queried FROM THE DRIVER on
+    // every call — the wrapper already tracks the draw FBO and hardext knows the cap.
+    // Use the EFFECTIVE native id: when gl4es emulates the default framebuffer with
+    // its own main FBO, logical id 0 is a real non-zero FBO on the driver side, and
+    // GL_BACK is not a legal draw buffer there.
+    GLint currentFBO = glstate->fbo.fbo_draw->id ? (GLint)glstate->fbo.fbo_draw->id : (GLint)glstate->fbo.mainfbo_fbo;
 
     if (currentFBO == 0) {
         GLenum buffers[1] = {GL_NONE};
@@ -1609,8 +1614,7 @@ void APIENTRY_GL4ES gl4es_glDrawBuffer(GLenum buffer) {
             break;
         }
     } else {
-        GLint maxAttachments;
-        gles_glGetIntegerv(GL_MAX_COLOR_ATTACHMENTS, &maxAttachments);
+        GLint maxAttachments = hardext.maxdrawbuffers;
 
         if (buffer == GL_NONE) {
             GLenum* buffers = (GLenum*)alloca(maxAttachments * sizeof(GLenum));
@@ -1664,13 +1668,33 @@ void APIENTRY_GL4ES gl4es_glNamedFramebufferDrawBuffers(GLuint framebuffer, GLsi
     noerrorShim();
 }
 
+// ZOMDROID (Codex minimap audit): the emulated glClearBuffer* below carried two real
+// bugs — drawbuff[] was indexed with the GL_COLOR enum (0x1800, wild out-of-bounds
+// read) instead of the drawbuffer index, and the buffer-select passed the raw index
+// where an attachment enum belongs. Fixed, and on ES3 the native entry point is used
+// directly (counted, so the exit probe tells us whether PZ ever comes here).
 void APIENTRY_GL4ES gl4es_glClearBufferiv(GLenum buffer, GLint drawbuffer, const GLint* value) {
+    {
+        static void (*zncb)(GLenum, GLint, const GLint*) = NULL;
+        static int zncb_init = 0;
+        if (!zncb_init) {
+            zncb_init = 1;
+            LOAD_EGL(eglGetProcAddress);
+            zncb = (void (*)(GLenum, GLint, const GLint*))egl_eglGetProcAddress("glClearBufferiv");
+        }
+        if (zncb && globals4es.esversion >= 300) {
+            zncb(buffer, drawbuffer, value);
+            zomdroid_clearbuf_native++;
+            noerrorShim();
+            return;
+        }
+    }
     noerrorShim();
     GLenum attch;
     switch (buffer) {
     case GL_COLOR:
-        if (drawbuffer > glstate->fbo.fbo_draw->n_draw) return; // GL_NONE...
-        attch = glstate->fbo.fbo_draw->drawbuff[buffer];
+        if (drawbuffer < 0 || drawbuffer >= glstate->fbo.fbo_draw->n_draw) return; // GL_NONE...
+        attch = glstate->fbo.fbo_draw->drawbuff[drawbuffer];
         if (!(attch >= GL_COLOR_ATTACHMENT0 && attch < GL_COLOR_ATTACHMENT0 + hardext.maxdrawbuffers)) {
             errorShim(GL_INVALID_VALUE);
             return;
@@ -1678,7 +1702,8 @@ void APIENTRY_GL4ES gl4es_glClearBufferiv(GLenum buffer, GLint drawbuffer, const
             GLfloat oldclear[4];
             LOAD_GLES_EXT(glDrawBuffers);
             // select the buffer...
-            if (hardext.drawbuffers) gles_glDrawBuffers(1, (const GLenum*)&drawbuffer);
+            GLenum zsel = GL_COLOR_ATTACHMENT0 + drawbuffer;
+            if (hardext.drawbuffers) gles_glDrawBuffers(1, &zsel);
             gl4es_glGetFloatv(GL_COLOR_CLEAR_VALUE, oldclear);
             // how to convert the value? Most FB will be 8bits / component for now...
             gl4es_glClearColor(value[0] / 127.0f, value[1] / 127.0f, value[2] / 127.0f, value[3] / 127.0f);
@@ -1707,12 +1732,27 @@ void APIENTRY_GL4ES gl4es_glClearBufferiv(GLenum buffer, GLint drawbuffer, const
     return;
 }
 void APIENTRY_GL4ES gl4es_glClearBufferuiv(GLenum buffer, GLint drawbuffer, const GLuint* value) {
+    {
+        static void (*zncb)(GLenum, GLint, const GLuint*) = NULL;
+        static int zncb_init = 0;
+        if (!zncb_init) {
+            zncb_init = 1;
+            LOAD_EGL(eglGetProcAddress);
+            zncb = (void (*)(GLenum, GLint, const GLuint*))egl_eglGetProcAddress("glClearBufferuiv");
+        }
+        if (zncb && globals4es.esversion >= 300) {
+            zncb(buffer, drawbuffer, value);
+            zomdroid_clearbuf_native++;
+            noerrorShim();
+            return;
+        }
+    }
     noerrorShim();
     GLenum attch;
     switch (buffer) {
     case GL_COLOR:
-        if (drawbuffer > glstate->fbo.fbo_draw->n_draw) return; // GL_NONE...
-        attch = glstate->fbo.fbo_draw->drawbuff[buffer];
+        if (drawbuffer < 0 || drawbuffer >= glstate->fbo.fbo_draw->n_draw) return; // GL_NONE...
+        attch = glstate->fbo.fbo_draw->drawbuff[drawbuffer];
         if (!(attch >= GL_COLOR_ATTACHMENT0 && attch < GL_COLOR_ATTACHMENT0 + hardext.maxdrawbuffers)) {
             errorShim(GL_INVALID_VALUE);
             return;
@@ -1720,7 +1760,8 @@ void APIENTRY_GL4ES gl4es_glClearBufferuiv(GLenum buffer, GLint drawbuffer, cons
             GLfloat oldclear[4];
             LOAD_GLES_EXT(glDrawBuffers);
             // select the buffer...
-            if (hardext.drawbuffers) gles_glDrawBuffers(1, (const GLenum*)&drawbuffer);
+            GLenum zsel = GL_COLOR_ATTACHMENT0 + drawbuffer;
+            if (hardext.drawbuffers) gles_glDrawBuffers(1, &zsel);
             gl4es_glGetFloatv(GL_COLOR_CLEAR_VALUE, oldclear);
             // how to convert the value? Most FB will be 8bits / component for now...
             gl4es_glClearColor(value[0] / 255.0f, value[1] / 255.0f, value[2] / 255.0f, value[3] / 255.0f);
@@ -1737,12 +1778,27 @@ void APIENTRY_GL4ES gl4es_glClearBufferuiv(GLenum buffer, GLint drawbuffer, cons
     return;
 }
 void APIENTRY_GL4ES gl4es_glClearBufferfv(GLenum buffer, GLint drawbuffer, const GLfloat* value) {
+    {
+        static void (*zncb)(GLenum, GLint, const GLfloat*) = NULL;
+        static int zncb_init = 0;
+        if (!zncb_init) {
+            zncb_init = 1;
+            LOAD_EGL(eglGetProcAddress);
+            zncb = (void (*)(GLenum, GLint, const GLfloat*))egl_eglGetProcAddress("glClearBufferfv");
+        }
+        if (zncb && globals4es.esversion >= 300) {
+            zncb(buffer, drawbuffer, value);
+            zomdroid_clearbuf_native++;
+            noerrorShim();
+            return;
+        }
+    }
     noerrorShim();
     GLenum attch;
     switch (buffer) {
     case GL_COLOR:
-        if (drawbuffer > glstate->fbo.fbo_draw->n_draw) return; // GL_NONE...
-        attch = glstate->fbo.fbo_draw->drawbuff[buffer];
+        if (drawbuffer < 0 || drawbuffer >= glstate->fbo.fbo_draw->n_draw) return; // GL_NONE...
+        attch = glstate->fbo.fbo_draw->drawbuff[drawbuffer];
         if (!(attch >= GL_COLOR_ATTACHMENT0 && attch < GL_COLOR_ATTACHMENT0 + hardext.maxdrawbuffers)) {
             errorShim(GL_INVALID_VALUE);
             return;
@@ -1750,7 +1806,8 @@ void APIENTRY_GL4ES gl4es_glClearBufferfv(GLenum buffer, GLint drawbuffer, const
             GLfloat oldclear[4];
             LOAD_GLES_EXT(glDrawBuffers);
             // select the buffer...
-            if (hardext.drawbuffers) gles_glDrawBuffers(1, (const GLenum*)&drawbuffer);
+            GLenum zsel = GL_COLOR_ATTACHMENT0 + drawbuffer;
+            if (hardext.drawbuffers) gles_glDrawBuffers(1, &zsel);
             gl4es_glGetFloatv(GL_COLOR_CLEAR_VALUE, oldclear);
             // how to convert the value? Most FB will be 8bits / component for now...
             gl4es_glClearColor(value[0], value[1], value[2], value[3]);
@@ -1779,6 +1836,21 @@ void APIENTRY_GL4ES gl4es_glClearBufferfv(GLenum buffer, GLint drawbuffer, const
     return;
 }
 void APIENTRY_GL4ES gl4es_glClearBufferfi(GLenum buffer, GLint drawbuffer, GLfloat depth, GLint stencil) {
+    {
+        static void (*zncb)(GLenum, GLint, GLfloat, GLint) = NULL;
+        static int zncb_init = 0;
+        if (!zncb_init) {
+            zncb_init = 1;
+            LOAD_EGL(eglGetProcAddress);
+            zncb = (void (*)(GLenum, GLint, GLfloat, GLint))egl_eglGetProcAddress("glClearBufferfi");
+        }
+        if (zncb && globals4es.esversion >= 300) {
+            zncb(buffer, drawbuffer, depth, stencil);
+            zomdroid_clearbuf_native++;
+            noerrorShim();
+            return;
+        }
+    }
     if (buffer != GL_DEPTH_STENCIL || drawbuffer != 0) {
         errorShim(GL_INVALID_ENUM);
         return;
