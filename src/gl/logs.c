@@ -229,11 +229,11 @@ void zomdroid_glalloc_cum(int cat, long bytes) {
 // shows up in the log, the death is a plain exit() inside emulated code (box64 territory).
 static void zomdroid_exit_probe(void) {
     extern int zccache_hits, zccache_miss;
-    extern long zomdroid_fbo_bind_app, zomdroid_fbo_bind_native, zomdroid_clearbuf_native;
+    extern long zomdroid_fbo_bind_app, zomdroid_fbo_bind_native, zomdroid_fbo_bind_skip, zomdroid_clearbuf_native;
     zomdroid_memstat_tag("exit");
     zga_report("exit");
-    zomdroid_gltrace("FBO session: binds app=%ld native=%ld clearbuf-native=%ld", zomdroid_fbo_bind_app,
-                     zomdroid_fbo_bind_native, zomdroid_clearbuf_native);
+    zomdroid_gltrace("FBO session: binds app=%ld native=%ld skipped=%ld clearbuf-native=%ld", zomdroid_fbo_bind_app,
+                     zomdroid_fbo_bind_native, zomdroid_fbo_bind_skip, zomdroid_clearbuf_native);
     zomdroid_gltrace("CCACHE session: hits=%d miss=%d", zccache_hits, zccache_miss);
     zomdroid_gltrace("EXIT-PROBE: process exiting via exit(), not a signal kill");
 }

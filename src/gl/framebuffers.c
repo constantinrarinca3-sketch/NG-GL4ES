@@ -14,6 +14,11 @@
 #include "init.h"
 #include "loader.h"
 
+// ZOMDROID: the one entry point allowed to change the driver's FBO binding (defined
+// below, next to the bind counters) — declared here for the helpers above it.
+void zomdroid_fbo_bind_native_do(GLenum target, GLuint id);
+void zomdroid_fbo_bind_forget(void);
+
 // #define DEBUG
 #ifdef DEBUG
 #define DBG(a) a
@@ -63,7 +68,7 @@ void readfboBegin() {
     GLuint fbo = glstate->fbo.fbo_read->id;
     if (!fbo) fbo = glstate->fbo.mainfbo_fbo;
     LOAD_GLES2_OR_OES(glBindFramebuffer);
-    gles_glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    zomdroid_fbo_bind_native_do(GL_FRAMEBUFFER, fbo);
 }
 
 void readfboEnd() {
@@ -75,7 +80,7 @@ void readfboEnd() {
     GLuint fbo = glstate->fbo.fbo_draw->id;
     if (!fbo) fbo = glstate->fbo.mainfbo_fbo;
     LOAD_GLES2_OR_OES(glBindFramebuffer);
-    gles_glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    zomdroid_fbo_bind_native_do(GL_FRAMEBUFFER, fbo);
 }
 
 glrenderbuffer_t* find_renderbuffer(GLuint renderbuffer) {
@@ -117,17 +122,41 @@ void APIENTRY_GL4ES gl4es_glGenFramebuffers(GLsizei n, GLuint* ids) {
     }
 }
 
-// ZOMDROID FBO BIND DIET (Codex minimap audit 2026-08-11): session counters the exit
-// probe reports. NOTE: a same-FBO rebind dedup cache was tried and REMOVED — a dozen
-// sites (fpe.c TexGen path, blit, ReadDraw_Push, glGetTexImage scratch) call
-// gles_glBindFramebuffer directly, so any wrapper-side cache goes stale and would
-// eventually skip a REQUIRED rebind. Dedup needs those sites funneled first.
+// ZOMDROID FBO BIND DIET (Codex minimap audit; field data 2026-08-17: a weak-device
+// session with the map open issued 321 506 native FBO binds). On tiled mobile GPUs a
+// framebuffer bind can force a tile flush/resolve, so redundant rebinds of the SAME
+// framebuffer are expensive. A dedup cache was tried and dropped once because a dozen
+// sites bind natively behind the wrapper's back; the fix is to funnel every native
+// bind through zomdroid_fbo_bind_native_do(), which keeps the cache honest.
 long zomdroid_fbo_bind_app = 0;    // app-level glBindFramebuffer calls
 long zomdroid_fbo_bind_native = 0; // native binds actually issued
+long zomdroid_fbo_bind_skip = 0;   // redundant binds skipped by the cache
 long zomdroid_clearbuf_native = 0; // native glClearBuffer* fast-path uses
+static GLuint zfbo_cur_draw = 0xFFFFFFFFu;
+static GLuint zfbo_cur_read = 0xFFFFFFFFu;
+
+// The single place allowed to touch the driver's framebuffer binding.
+void zomdroid_fbo_bind_native_do(GLenum target, GLuint id) {
+    LOAD_GLES2_OR_OES(glBindFramebuffer);
+    gles_glBindFramebuffer(target, id);
+    zomdroid_fbo_bind_native++;
+    if (target == GL_FRAMEBUFFER) {
+        zfbo_cur_draw = id;
+        zfbo_cur_read = id;
+    } else if (target == GL_DRAW_FRAMEBUFFER)
+        zfbo_cur_draw = id;
+    else if (target == GL_READ_FRAMEBUFFER)
+        zfbo_cur_read = id;
+}
+// Deleting can recycle ids — forget what we think is bound.
+void zomdroid_fbo_bind_forget(void) {
+    zfbo_cur_draw = 0xFFFFFFFFu;
+    zfbo_cur_read = 0xFFFFFFFFu;
+}
 
 void APIENTRY_GL4ES gl4es_glDeleteFramebuffers(GLsizei n, GLuint* framebuffers) {
     DBG(SHUT_LOGD("glDeleteFramebuffers(%i, %p), framebuffers[0]=%u\n", n, framebuffers, framebuffers[0]);)
+    zomdroid_fbo_bind_forget();
     // delete tracking
     if (glstate->fbo.framebufferlist)
         for (int i = 0; i < n; i++) {
@@ -232,6 +261,16 @@ void APIENTRY_GL4ES gl4es_glBindFramebuffer(GLenum target, GLuint framebuffer) {
                   PrintEnum(target), framebuffer, glstate->list.active ? "active" : "none", glstate->fbo.current_fb->id,
                   glstate->fbo.fbo_draw->id, glstate->fbo.fbo_read->id);)
     zomdroid_fbo_bind_app++;
+    // Report progress mid-session: the exit summary only survives a clean shutdown,
+    // and this game gets killed often enough that waiting for it loses the data.
+    if ((zomdroid_fbo_bind_app % 50000) == 0) {
+        static int zfbo_step_budget = 20;
+        if (zfbo_step_budget > 0) {
+            zfbo_step_budget--;
+            zomdroid_gltrace("FBO step: binds app=%ld native=%ld skipped=%ld", zomdroid_fbo_bind_app,
+                             zomdroid_fbo_bind_native, zomdroid_fbo_bind_skip);
+        }
+    }
     // ZOMDROID FBO BIND DIET (Codex minimap audit 2026-08-11): GL_FRAMEBUFFER used to
     // expand into THREE recursive calls, each issuing its own native bind PLUS an
     // unconditional glGetError — a sync-prone driver round-trip per call, tripled, on
@@ -269,8 +308,24 @@ void APIENTRY_GL4ES gl4es_glBindFramebuffer(GLenum target, GLuint framebuffer) {
     GLuint znative = framebuffer ? framebuffer : glstate->fbo.mainfbo_fbo;
     glstate->fbo.current_fb = fb;
 
-    gles_glBindFramebuffer(target, znative);
-    zomdroid_fbo_bind_native++;
+    // Skip a rebind of what is already bound. Field measurement that motivated this:
+    // 321 506 native binds in one map-open session on a weak device — each one a
+    // potential tile flush on a mobile GPU.
+    int zsame;
+    if (target == GL_FRAMEBUFFER)
+        zsame = (zfbo_cur_draw == znative && zfbo_cur_read == znative);
+    else if (target == GL_DRAW_FRAMEBUFFER)
+        zsame = (zfbo_cur_draw == znative);
+    else
+        zsame = (zfbo_cur_read == znative);
+
+    if (zsame) {
+        zomdroid_fbo_bind_skip++;
+        noerrorShim();
+        return;
+    }
+
+    zomdroid_fbo_bind_native_do(target, znative);
     if (!globals4es.noerror) {
         GLenum err = gles_glGetError();
         errorShim(err);
@@ -302,11 +357,11 @@ void ReadDraw_Pop(GLenum target) {
     if (target == GL_FRAMEBUFFER) return;
     LOAD_GLES2_OR_OES(glBindFramebuffer);
     if (target == GL_DRAW_FRAMEBUFFER && glstate->fbo.current_fb != glstate->fbo.fbo_draw) {
-        gles_glBindFramebuffer(GL_DRAW_FRAMEBUFFER,
+        zomdroid_fbo_bind_native_do(GL_DRAW_FRAMEBUFFER,
                                (glstate->fbo.current_fb->id) ? glstate->fbo.current_fb->id : glstate->fbo.mainfbo_fbo);
     }
     if (target == GL_READ_FRAMEBUFFER && glstate->fbo.current_fb != glstate->fbo.fbo_read) {
-        gles_glBindFramebuffer(GL_READ_FRAMEBUFFER,
+        zomdroid_fbo_bind_native_do(GL_READ_FRAMEBUFFER,
                                (glstate->fbo.current_fb->id) ? glstate->fbo.current_fb->id : glstate->fbo.mainfbo_fbo);
     }
 }
@@ -1335,7 +1390,7 @@ void createMainFBO(int width, int height) {
     gles_glBindRenderbuffer(GL_RENDERBUFFER, 0);
     // create a fbo
     if (createIt) gles_glGenFramebuffers(1, &glstate->fbo.mainfbo_fbo);
-    gles_glBindFramebuffer(GL_FRAMEBUFFER, glstate->fbo.mainfbo_fbo);
+    zomdroid_fbo_bind_native_do(GL_FRAMEBUFFER, glstate->fbo.mainfbo_fbo);
 
     // re-attach, even if not creating the fbo...
     gles_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_RENDERBUFFER, glstate->fbo.mainfbo_ste);
@@ -1345,7 +1400,7 @@ void createMainFBO(int width, int height) {
 
     GLenum status = gles_glCheckFramebufferStatus(GL_FRAMEBUFFER);
 
-    gles_glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    zomdroid_fbo_bind_native_do(GL_FRAMEBUFFER, 0);
 
     // Put everything back
     gles_glBindTexture(GL_TEXTURE_2D, glstate->texture.bound[0][ENABLED_TEX2D]->glname);
@@ -1358,10 +1413,10 @@ void createMainFBO(int width, int height) {
     if (status != GL_FRAMEBUFFER_COMPLETE) {
         SHUT_LOGD("LIBGL: Error while creating main fbo (0x%04X)\n", status);
         deleteMainFBO(glstate);
-        gles_glBindFramebuffer(GL_FRAMEBUFFER, glstate->fbo.current_fb->id);
+        zomdroid_fbo_bind_native_do(GL_FRAMEBUFFER, glstate->fbo.current_fb->id);
 
     } else {
-        gles_glBindFramebuffer(GL_FRAMEBUFFER,
+        zomdroid_fbo_bind_native_do(GL_FRAMEBUFFER,
                                (glstate->fbo.current_fb->id) ? glstate->fbo.current_fb->id : glstate->fbo.mainfbo_fbo);
         // clear color, depth and stencil...
         if (glstate->fbo.current_fb->id == 0)
@@ -1402,7 +1457,7 @@ void bindMainFBO() {
     LOAD_GLES2_OR_OES(glCheckFramebufferStatus);
     if (!glstate->fbo.mainfbo_fbo) return;
     if (glstate->fbo.current_fb->id == 0) {
-        gles_glBindFramebuffer(GL_FRAMEBUFFER, glstate->fbo.mainfbo_fbo);
+        zomdroid_fbo_bind_native_do(GL_FRAMEBUFFER, glstate->fbo.mainfbo_fbo);
         // gles_glCheckFramebufferStatus(GL_FRAMEBUFFER);
     }
 }
@@ -1411,7 +1466,7 @@ void unbindMainFBO() {
     LOAD_GLES2_OR_OES(glBindFramebuffer);
     if (!glstate->fbo.mainfbo_fbo) return;
     if (glstate->fbo.current_fb->id == 0) {
-        gles_glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        zomdroid_fbo_bind_native_do(GL_FRAMEBUFFER, 0);
     }
 }
 
@@ -1586,7 +1641,7 @@ GLuint gl4es_getCurrentFBO() {
 
 void gl4es_setCurrentFBO() {
     LOAD_GLES2_OR_OES(glBindFramebuffer);
-    gles_glBindFramebuffer(GL_FRAMEBUFFER,
+    zomdroid_fbo_bind_native_do(GL_FRAMEBUFFER,
                            (glstate->fbo.current_fb->id) ? glstate->fbo.current_fb->id : glstate->fbo.mainfbo_fbo);
 }
 
@@ -1964,7 +2019,7 @@ void gl4es_saveCurrentFBO() {
         LOAD_GLES2_OR_OES(glBindFramebuffer);
         if (hardext.vendor & VEND_ARM)
             gl4es_glFinish(); // MALI seems to need a flush commandbefore unbinding the Framebuffer here
-        gles_glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        zomdroid_fbo_bind_native_do(GL_FRAMEBUFFER, 0);
     }
 }
 
@@ -1974,7 +2029,7 @@ void gl4es_restoreCurrentFBO() {
     if (framebuffer == 0) framebuffer = glstate->fbo.mainfbo_fbo;
     if (framebuffer) {
         LOAD_GLES2_OR_OES(glBindFramebuffer);
-        gles_glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+        zomdroid_fbo_bind_native_do(GL_FRAMEBUFFER, framebuffer);
     }
 }
 

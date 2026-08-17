@@ -14,6 +14,7 @@
 #include "shaderconv.h"
 
 #include "fpe.h"
+extern void zomdroid_fbo_bind_native_do(GLenum target, GLuint id);
 
 #define fpe_state_t fpe_state_t
 #define fpe_fpe_t fpe_fpe_t
@@ -1186,8 +1187,8 @@ void realize_glenv(int ispoint, int first, int count, GLenum type, const void* i
             LOAD_GLES2_OR_OES(glBindFramebuffer);
             LOAD_GLES2_OR_OES(glFramebufferTexture2D);
             // gles_glFramebufferTexture2D(GL_FRAMEBUFFER, tex->binded_attachment, GL_TEXTURE_2D, 0, 0);
-            gles_glBindFramebuffer(GL_FRAMEBUFFER, 0);
-            gles_glBindFramebuffer(GL_FRAMEBUFFER, glstate->fbo.current_fb->id);
+            zomdroid_fbo_bind_native_do(GL_FRAMEBUFFER, 0);
+            zomdroid_fbo_bind_native_do(GL_FRAMEBUFFER, glstate->fbo.current_fb->id);
             // gles_glFramebufferTexture2D(GL_FRAMEBUFFER, tex->binded_attachment, GL_TEXTURE_2D, tex->glname, 0);
         }
     }
