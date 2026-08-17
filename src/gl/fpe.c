@@ -839,6 +839,7 @@ void APIENTRY_GL4ES fpe_glDrawArraysInstanced(GLenum mode, GLint first, GLsizei 
             {
                 vertexattrib_t* w = &glstate->vao->vertexattrib[i];
                 if (w->divisor && w->enabled) {
+                    if (w->buffer) buffer_ensure_shadow(w->buffer); // lazy shadow: instanced attribs read CPU-side
                     char* current = (char*)((uintptr_t)w->pointer + ((w->buffer) ? (uintptr_t)w->buffer->data : 0));
                     int stride = w->stride;
                     if (!stride) stride = gl_sizeof(w->type) * w->size;
@@ -899,6 +900,7 @@ void APIENTRY_GL4ES fpe_glDrawElementsInstanced(GLenum mode, GLsizei count, GLen
             {
                 vertexattrib_t* w = &glstate->vao->vertexattrib[i];
                 if (w->divisor && w->enabled) {
+                    if (w->buffer) buffer_ensure_shadow(w->buffer); // lazy shadow: instanced attribs read CPU-side
                     char* current = (char*)((uintptr_t)w->pointer + ((w->buffer) ? (uintptr_t)w->buffer->data : 0));
                     int stride = w->stride;
                     if (!stride) stride = gl_sizeof(w->type) * w->size;
@@ -1493,6 +1495,11 @@ void realize_glenv(int ispoint, int first, int count, GLenum type, const void* i
                     v->real_buffer != w->real_buffer || (w->real_buffer != 0 && v->real_pointer != w->real_pointer) ||
                     w->real_buffer != glstate->bind_buffer.array) {
                     if ((w->size == GL_BGRA || w->type == GL_DOUBLE) && scratch->size < 8) {
+                        // lazy shadow: this conversion path reads the vertex data CPU-side
+                        if (w->buffer) {
+                            buffer_ensure_shadow(w->buffer);
+                            ptr = (void*)((uintptr_t)w->pointer + (uintptr_t)w->buffer->data);
+                        }
                         // need to adjust, so first need the min/max (a shame as I already must have that somewhere)
                         int imin, imax;
                         if (type == 0) {
@@ -1556,6 +1563,7 @@ void realize_glenv(int ispoint, int first, int count, GLenum type, const void* i
                 char* current = (char*)glstate->vavalue[i];
                 GLfloat tmp[4] = {0.0f, 0.0f, 0.0f, 1.0f};
                 if (w->divisor && w->enabled) {
+                    if (w->buffer) buffer_ensure_shadow(w->buffer); // lazy shadow: divisor attrib reads CPU-side
                     current = (char*)((uintptr_t)w->pointer + ((w->buffer) ? (uintptr_t)w->buffer->data : 0));
                     int stride = w->stride;
                     if (!stride) stride = gl_sizeof(w->type) * w->size;

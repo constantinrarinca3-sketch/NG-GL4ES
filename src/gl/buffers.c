@@ -233,20 +233,44 @@ void APIENTRY_GL4ES gl4es_glBufferData(GLenum target, GLsizeiptr size, const GLv
         DBG(SHUT_LOGD(" => real VBO %d\n", buff->real_buffer);)
     }
 
-    if (buff->data && buff->size < size) {
-        zomdroid_shadow_sub(buff->size);
-        free(buff->data);
-        buff->data = NULL;
+    // ZOMDROID LAZY SHADOW (MobileGlues-inspired, 2026-08-17): when the driver owns a
+    // real copy of an ARRAY buffer, keeping a CPU shadow doubled every stream upload
+    // (map/rain sessions measured 3.8-12 GB of buffer churn — each byte written twice).
+    // Drop the shadow instead; buffer_ensure_shadow() re-materializes it on demand by
+    // READ-mapping the driver copy, which is why this is gated to ES3 contexts.
+    // ELEMENT buffers keep their shadow: the emulated draw paths read indices from it.
+    // LIBGL_LAZYSHADOW=0 restores the old always-shadow behavior.
+    int zlazy = 0;
+    if (go_real && target == GL_ARRAY_BUFFER && globals4es.esversion >= 300) {
+        static int zlz = -1;
+        if (zlz < 0) {
+            const char* ze = getenv("LIBGL_LAZYSHADOW");
+            zlz = ze ? atoi(ze) : 1;
+        }
+        zlazy = zlz;
     }
-    if (!buff->data) {
-        buff->data = malloc(size);
-        zomdroid_shadow_add(size);
+    if (zlazy) {
+        if (buff->data) {
+            zomdroid_shadow_sub(buff->size);
+            free(buff->data);
+            buff->data = NULL;
+        }
+    } else {
+        if (buff->data && buff->size < size) {
+            zomdroid_shadow_sub(buff->size);
+            free(buff->data);
+            buff->data = NULL;
+        }
+        if (!buff->data) {
+            buff->data = malloc(size);
+            zomdroid_shadow_add(size);
+        }
     }
     buff->size = size;
     buff->usage = usage;
     DBG(SHUT_LOGD("\t buff->data = %p (size=%zd)\n", buff->data, size);)
     buff->access = GL_READ_WRITE;
-    if (data) memcpy(buff->data, data, size);
+    if (data && buff->data) memcpy(buff->data, data, size);
     // update binded VA
     for (int i = 0; i < hardext.maxvattrib; ++i) {
         vertexattrib_t* v = &glstate->vao->vertexattrib[i];
@@ -343,7 +367,8 @@ void APIENTRY_GL4ES gl4es_glBufferSubData(GLenum target, GLintptr offset, GLsize
         gles_glBufferSubData(target, offset, size, data);
     }
 
-    memcpy((char*)buff->data + offset, data, size);
+    // lazy-shadow buffers have no CPU copy to keep coherent — the driver got it above
+    if (buff->data) memcpy((char*)buff->data + offset, data, size);
     noerrorShim();
 }
 void APIENTRY_GL4ES gl4es_glNamedBufferSubData(GLuint buffer, GLintptr offset, GLsizeiptr size, const GLvoid* data) {
@@ -490,6 +515,39 @@ void APIENTRY_GL4ES gl4es_glGetNamedBufferParameteriv(GLuint buffer, GLenum valu
     bufferGetParameteriv(buff, value, data);
 }
 
+// ZOMDROID LAZY SHADOW: re-materialize a dropped CPU copy on demand. The content is
+// downloaded from the driver via a READ map (the lazy drop is ES3-gated precisely so
+// this is always possible); if that fails the shadow comes back zeroed, loudly.
+void buffer_ensure_shadow(glbuffer_t* buff) {
+    if (!buff || buff->data || buff->size <= 0) return;
+    buff->data = malloc(buff->size);
+    if (!buff->data) return;
+    zomdroid_shadow_add(buff->size);
+    int zok = 0;
+    if (buff->real_buffer) {
+        LOAD_GLES3(glMapBufferRange);
+        LOAD_GLES3(glUnmapBuffer);
+        if (gles_glMapBufferRange && gles_glUnmapBuffer) {
+            bindBuffer(buff->type, buff->real_buffer);
+            void* zp = gles_glMapBufferRange(buff->type, 0, buff->size, GL_MAP_READ_BIT_EXT);
+            if (zp) {
+                memcpy(buff->data, zp, (size_t)buff->size);
+                gles_glUnmapBuffer(buff->type);
+                zok = 1;
+            }
+        }
+    }
+    if (!zok) memset(buff->data, 0, (size_t)buff->size);
+    {
+        static int zres_log = 0;
+        if (zres_log < 6) {
+            zres_log++;
+            extern void zomdroid_gltrace(const char* fmt, ...);
+            zomdroid_gltrace("SHADOW resurrect buf=%u size=%ld from-driver=%d", buff->buffer, (long)buff->size, zok);
+        }
+    }
+}
+
 void* APIENTRY_GL4ES gl4es_glMapBuffer(GLenum target, GLenum access) {
     DBG(SHUT_LOGD("glMapBuffer(%s, %s)\n", PrintEnum(target), PrintEnum(access));)
     if (!buffer_target(target)) {
@@ -508,16 +566,12 @@ void* APIENTRY_GL4ES gl4es_glMapBuffer(GLenum target, GLenum access) {
         errorShim(GL_INVALID_OPERATION);
         return NULL;
     }
-    // ZOMDROID FIX (same hole as glMapBufferRange): never hand out NULL/short storage.
+    // ZOMDROID: lazy shadows materialize here (with a driver download); this also
+    // subsumes the old never-hand-out-NULL guard.
+    buffer_ensure_shadow(buff);
     if (!buff->data && buff->size > 0) {
-        extern void zomdroid_gltrace(const char* fmt, ...);
-        zomdroid_gltrace("MAP guard: buf=%u size=%zd had no shadow store", buff->buffer, (size_t)buff->size);
-        buff->data = calloc(1, (size_t)buff->size);
-        if (!buff->data) {
-            errorShim(GL_OUT_OF_MEMORY);
-            return NULL;
-        }
-        zomdroid_shadow_add(buff->size);
+        errorShim(GL_OUT_OF_MEMORY);
+        return NULL;
     }
     buff->access = access; // not used
     buff->mapped = 1;
@@ -722,6 +776,8 @@ void APIENTRY_GL4ES gl4es_glGetBufferSubData(GLenum target, GLintptr offset, GLs
     if (buff == NULL)
         return; // Should generate an error!
                 // TODO, check parameter consistancie
+    buffer_ensure_shadow(buff); // lazy buffers download from the driver here
+    if (!buff->data) return;
     memcpy(data, (char*)buff->data + offset, size);
     noerrorShim();
 }
@@ -732,6 +788,8 @@ void APIENTRY_GL4ES gl4es_glGetNamedBufferSubData(GLuint buffer, GLintptr offset
     if (buff == NULL)
         return; // Should generate an error!
                 // TODO, check parameter consistancie
+    buffer_ensure_shadow(buff); // lazy buffers download from the driver here
+    if (!buff->data) return;
     memcpy(data, (char*)buff->data + offset, size);
     noerrorShim();
 }
@@ -788,29 +846,6 @@ void* APIENTRY_GL4ES gl4es_glMapBufferRange(GLenum target, GLintptr offset, GLsi
     if (offset < 0 || length < 0) {
         errorShim(GL_INVALID_VALUE);
         return NULL;
-    }
-    // ZOMDROID FIX (Mali ES3-mine, named by the GL3 probe): this "mapping" hands out a
-    // pointer into the client shadow store WITHOUT checking that it exists or covers
-    // offset+length. When PZ mapped a buffer before glBufferData (or past its size),
-    // the caller's first write through the returned pointer killed the process with no
-    // GL call on the stack — the silent Bullet.init death no catcher could see.
-    {
-        size_t zneed = (size_t)offset + (size_t)length;
-        if (zneed > 0 && (!buff->data || (size_t)buff->size < zneed)) {
-            extern void zomdroid_gltrace(const char* fmt, ...);
-            zomdroid_gltrace("MAPRANGE guard: buf=%u data=%p size=%zd need=%zd", buff->buffer, buff->data,
-                             (size_t)buff->size, zneed);
-            void* znd = realloc(buff->data, zneed);
-            if (!znd) {
-                errorShim(GL_OUT_OF_MEMORY);
-                return NULL;
-            }
-            size_t zold = buff->data ? (size_t)buff->size : 0;
-            if (zneed > zold) memset((char*)znd + zold, 0, zneed - zold);
-            zomdroid_shadow_add((long)(zneed - zold));
-            buff->data = znd;
-            if ((size_t)buff->size < zneed) buff->size = (GLsizeiptr)zneed;
-        }
     }
     // ZOMDROID NATIVE MAP (map/rain/driving FPS, 2026-08-07): on an ES3 context the
     // driver maps the buffer itself — the app writes ONCE into driver memory instead
@@ -901,6 +936,33 @@ void* APIENTRY_GL4ES gl4es_glMapBufferRange(GLenum target, GLintptr offset, GLsi
             }
         }
     }
+    // ZOMDROID: shadow leg only — the native legs above returned already. Lazy
+    // shadows materialize here with a driver download, so a partial write through
+    // the mapping cannot lose the driver-side bytes around it.
+    buffer_ensure_shadow(buff);
+    // ZOMDROID FIX (Mali ES3-mine, named by the GL3 probe): this "mapping" hands out a
+    // pointer into the client shadow store WITHOUT checking that it exists or covers
+    // offset+length. When PZ mapped a buffer before glBufferData (or past its size),
+    // the caller's first write through the returned pointer killed the process with no
+    // GL call on the stack — the silent Bullet.init death no catcher could see.
+    {
+        size_t zneed = (size_t)offset + (size_t)length;
+        if (zneed > 0 && (!buff->data || (size_t)buff->size < zneed)) {
+            extern void zomdroid_gltrace(const char* fmt, ...);
+            zomdroid_gltrace("MAPRANGE guard: buf=%u data=%p size=%zd need=%zd", buff->buffer, buff->data,
+                             (size_t)buff->size, zneed);
+            void* znd = realloc(buff->data, zneed);
+            if (!znd) {
+                errorShim(GL_OUT_OF_MEMORY);
+                return NULL;
+            }
+            size_t zold = buff->data ? (size_t)buff->size : 0;
+            if (zneed > zold) memset((char*)znd + zold, 0, zneed - zold);
+            zomdroid_shadow_add((long)(zneed - zold));
+            buff->data = znd;
+            if ((size_t)buff->size < zneed) buff->size = (GLsizeiptr)zneed;
+        }
+    }
     buff->access = access;
     buff->mapped = 1;
     buff->ranged = 1;
@@ -979,6 +1041,10 @@ void APIENTRY_GL4ES gl4es_glCopyBufferSubData(GLenum readTarget, GLenum writeTar
         errorShim(GL_INVALID_VALUE);
         return;
     }
+
+    // lazy buffers: both sides of the CPU copy need real content
+    buffer_ensure_shadow(readbuff);
+    buffer_ensure_shadow(writebuff);
 
     if ((writebuff->ranged && !(writebuff->access & GL_MAP_PERSISTENT_BIT)) && readTarget != GL_COPY_READ_BUFFER) {
         errorShim(GL_INVALID_OPERATION);

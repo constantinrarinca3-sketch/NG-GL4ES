@@ -41,6 +41,8 @@ typedef struct {
 KHASH_MAP_DECLARE_INT(buff, glbuffer_t*);
 
 void bindBuffer(GLenum target, GLuint buffer);
+// ZOMDROID LAZY SHADOW: materialize the CPU copy of a lazy (driver-only) buffer
+void buffer_ensure_shadow(glbuffer_t* buff);
 
 void APIENTRY_GL4ES gl4es_glGenBuffers(GLsizei n, GLuint* buffers);
 void APIENTRY_GL4ES gl4es_glBindBuffer(GLenum target, GLuint buffer);
