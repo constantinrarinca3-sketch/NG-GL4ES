@@ -1021,6 +1021,70 @@ static size_t zomdroid_preamble_end(const char* src) {
     }
     return off;
 }
+// ZOMDROID (Mali-G615, field 2026-08-19): a driver may ADVERTISE
+// GL_EXT_shader_non_constant_global_initializers in GL_EXTENSIONS and then have its
+// compiler reject exactly what that extension permits. On that device every vehicle
+// program (SphereMap + PuddlesParams, puddle math is inlined into the car shaders)
+// failed to link, because the gate below stood the hoist down on the strength of the
+// advertisement alone. So ask the compiler instead of the extension string: build the
+// smallest shader the extension exists for and see whether it survives. Once per process.
+static int zomdroid_nonconstinit_honored(const char* src) {
+    static int zverdict = -1;
+    if (zverdict >= 0) return zverdict;
+    // Probe in the same shading language as the shader that raised the question: the
+    // rejection is version specific (PZ compiles "#version 320 es"), and a probe written
+    // in another version would answer a question nobody asked. Without a version line
+    // there is nothing to match, so keep the old behavior and do not cache a verdict.
+    char ver[64];
+    ver[0] = '\0';
+    if (src) {
+        const char* v = strstr(src, "#version");
+        if (v && (v == src || v[-1] == '\n')) {
+            const char* e = strchr(v, '\n');
+            size_t n = e ? (size_t)(e - v) : strlen(v);
+            if (n < sizeof(ver) - 2) {
+                memcpy(ver, v, n);
+                ver[n] = '\n';
+                ver[n + 1] = '\0';
+            }
+        }
+    }
+    if (!ver[0]) return 1;
+    LOAD_GLES2(glCreateShader);
+    LOAD_GLES2(glShaderSource);
+    LOAD_GLES2(glCompileShader);
+    LOAD_GLES2(glGetShaderiv);
+    LOAD_GLES2(glDeleteShader);
+    if (!gles_glCreateShader || !gles_glShaderSource || !gles_glCompileShader || !gles_glGetShaderiv ||
+        !gles_glDeleteShader)
+        return 1;
+    // a VERTEX shader: gl_Position exists in every ES shading language version, so the
+    // probe needs no output declaration and stays valid from ESSL 1.00 through 3.20.
+    char probe[512];
+    snprintf(probe, sizeof(probe),
+             "%s#extension GL_EXT_shader_non_constant_global_initializers : enable\n"
+             "uniform float zprobe_u;\n"
+             "float zprobe_g = zprobe_u;\n"
+             "void main() { gl_Position = vec4(zprobe_g, 0.0, 0.0, 1.0); }\n",
+             ver);
+    GLuint zs = gles_glCreateShader(GL_VERTEX_SHADER);
+    if (!zs) return 1;
+    const char* zsrc = probe;
+    GLint zlen = (GLint)strlen(probe);
+    gles_glShaderSource(zs, 1, &zsrc, &zlen);
+    gles_glCompileShader(zs);
+    GLint zst = 0;
+    gles_glGetShaderiv(zs, GL_COMPILE_STATUS, &zst);
+    gles_glDeleteShader(zs);
+    zverdict = zst ? 1 : 0;
+    {
+        extern void zomdroid_gltrace(const char* fmt, ...);
+        zomdroid_gltrace("NONCONSTINIT probe: extension advertised, compiler %s",
+                         zverdict ? "honors it (shaders left untouched)"
+                                  : "REJECTS it -> hoisting initializers");
+    }
+    return zverdict;
+}
 static char* zomdroid_hoist_global_initializers(char* src) {
     if (!src) return src;
     // ZOMDROID FIX (black farming plots, field 2026-08-04): this rewrite exists ONLY
@@ -1029,7 +1093,7 @@ static char* zomdroid_hoist_global_initializers(char* src) {
     // exactly what every pre-wave5 build shipped — and rewriting anyway proved able to
     // shift the puddles blend math (wet farming plots went black with puddles ON).
     // Prefer the driver; hoist only when there is no other way to compile at all.
-    if (hardext.nonconstinit) return src;
+    if (hardext.nonconstinit && zomdroid_nonconstinit_honored(src)) return src;
     if (!zomdroid_find_main_brace(src)) return src;
     size_t slen = strlen(src);
     char* out = (char*)malloc(slen * 2 + 4096);
