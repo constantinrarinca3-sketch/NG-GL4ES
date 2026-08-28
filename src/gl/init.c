@@ -374,6 +374,10 @@ void initialize_gl4es() {
     glx_init();
 #endif
 
+    // FBO recycling changes the layout allocated by NewGLState(), so read the
+    // option before gl_init() creates the default state.
+    env(LIBGL_RECYCLEFBO, globals4es.recyclefbo, "Recycling of FBO enabled");
+
     gl_init();
 
 #ifdef GL4ES_COMPILE_FOR_USE_IN_SHARED_LIB
@@ -382,8 +386,6 @@ void initialize_gl4es() {
     agl_reset_internals();
 #endif
 #endif
-
-    env(LIBGL_RECYCLEFBO, globals4es.recyclefbo, "Recycling of FBO enabled");
 
     // Texture hacks
     globals4es.automipmap = ReturnEnvVarInt("LIBGL_MIPMAP");
@@ -916,7 +918,7 @@ void initialize_gl4es() {
     // verify WHICH renderer actually loaded (Zomdroid resets the choice on new instances).
     {
         extern void zomdroid_gltrace(const char* fmt, ...);
-        zomdroid_gltrace("INIT ng_gl4es RC42-PLAY (probe the non-constant-initializer extension instead of trusting it), noerror=%d",
+        zomdroid_gltrace("INIT ng_gl4es PRIDROID-FBO1 (safe framebuffer teardown/recycle), noerror=%d",
                          globals4es.noerror);
         {
             extern void zomdroid_exit_probe_register(void);

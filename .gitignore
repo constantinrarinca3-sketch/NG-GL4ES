@@ -10,6 +10,7 @@ CTestTestfile.cmake
 cmake_install.cmake
 spec/yml/gles-1.1-full.yml
 /build/
+/build-pridroid-arm64/
 /tests/*.png
 /src/glsl
 .vs

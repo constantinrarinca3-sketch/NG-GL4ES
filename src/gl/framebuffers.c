@@ -118,7 +118,8 @@ void APIENTRY_GL4ES gl4es_glGenFramebuffers(GLsizei n, GLuint* ids) {
         glframebuffer_t* fb = kh_value(list, k) = malloc(sizeof(glframebuffer_t));
         memset(fb, 0, sizeof(glframebuffer_t));
         fb->id = ids[i];
-        fb->n_draw = 0; // correct?
+        fb->n_draw = 1;
+        fb->drawbuff[0] = GL_COLOR_ATTACHMENT0;
     }
 }
 
@@ -156,63 +157,93 @@ void zomdroid_fbo_bind_forget(void) {
 
 void APIENTRY_GL4ES gl4es_glDeleteFramebuffers(GLsizei n, GLuint* framebuffers) {
     DBG(SHUT_LOGD("glDeleteFramebuffers(%i, %p), framebuffers[0]=%u\n", n, framebuffers, framebuffers[0]);)
-    zomdroid_fbo_bind_forget();
     // delete tracking
-    if (glstate->fbo.framebufferlist)
+    if (glstate->fbo.framebufferlist) {
         for (int i = 0; i < n; i++) {
             khint_t k;
             glframebuffer_t* fb;
-            for (int i = 0; i < n; i++) {
-                GLuint t = framebuffers[i];
-                if (t) {
-                    k = kh_get(framebufferlist_t, glstate->fbo.framebufferlist, t);
-                    if (k != kh_end(glstate->fbo.framebufferlist)) {
-                        fb = kh_value(glstate->fbo.framebufferlist, k);
-                        // detach texture...
-                        for (int j = 0; j < MAX_DRAW_BUFFERS; ++j) {
-                            if (fb->color[j] && fb->t_color[j] != GL_RENDERBUFFER) {
-                                gltexture_t* tex = gl4es_getTexture(fb->t_color[j], fb->color[j]);
-                                if (tex) {
-                                    tex->binded_fbo = 0;
-                                    tex->binded_attachment = 0;
-                                }
-                            }
+            GLuint t = framebuffers[i];
+            if (t) {
+                k = kh_get(framebufferlist_t, glstate->fbo.framebufferlist, t);
+                if (k != kh_end(glstate->fbo.framebufferlist)) {
+                    fb = kh_value(glstate->fbo.framebufferlist, k);
+                    const int was_read = glstate->fbo.fbo_read == fb;
+                    const int was_draw = glstate->fbo.fbo_draw == fb;
+                    const int was_current = glstate->fbo.current_fb == fb;
+                    const GLuint default_native = glstate->fbo.mainfbo_fbo;
+
+                    // GLES deletes a bound FBO by restoring binding zero. Recycling
+                    // skips the native delete, so mirror that behaviour explicitly
+                    // and keep the wrapper's shadow state on the logical default FBO.
+                    if (was_read && was_draw) {
+                        zomdroid_fbo_bind_native_do(GL_FRAMEBUFFER, default_native);
+                        glstate->fbo.fbo_read = glstate->fbo.fbo_0;
+                        glstate->fbo.fbo_draw = glstate->fbo.fbo_0;
+                    } else {
+                        if (was_read) {
+                            zomdroid_fbo_bind_native_do(GL_READ_FRAMEBUFFER, default_native);
+                            glstate->fbo.fbo_read = glstate->fbo.fbo_0;
                         }
-                        if (fb->depth && fb->t_depth != GL_RENDERBUFFER) {
-                            gltexture_t* tex = gl4es_getTexture(fb->t_depth, fb->depth);
-                            if (tex) {
-                                tex->binded_fbo = 0;
-                                tex->binded_attachment = 0;
-                                tex->renderdepth = 0;
-                            }
+                        if (was_draw) {
+                            zomdroid_fbo_bind_native_do(GL_DRAW_FRAMEBUFFER, default_native);
+                            glstate->fbo.fbo_draw = glstate->fbo.fbo_0;
                         }
-                        if (fb->stencil && fb->t_stencil != GL_RENDERBUFFER) {
-                            gltexture_t* tex = gl4es_getTexture(fb->t_stencil, fb->stencil);
-                            if (tex) {
-                                tex->binded_fbo = 0;
-                                tex->binded_attachment = 0;
-                                tex->renderstencil = 0;
-                            }
-                        }
-                        if (glstate->fbo.current_fb == fb) {
-                            glstate->fbo.current_fb = 0;
-                        }
-                        if (glstate->fbo.fbo_read == fb) {
-                            glstate->fbo.fbo_read = 0;
-                        }
-                        if (glstate->fbo.fbo_draw == fb) {
-                            glstate->fbo.fbo_draw = 0;
-                        }
-                        free(fb);
-                        kh_del(framebufferlist_t, glstate->fbo.framebufferlist, k);
                     }
+                    if (was_current) glstate->fbo.current_fb = glstate->fbo.fbo_0;
+                    glstate->fbo.internal = 0;
+
+                    static int pridroid_delete_log_budget = 32;
+                    if (pridroid_delete_log_budget > 0) {
+                        --pridroid_delete_log_budget;
+                        zomdroid_gltrace("PRIDROID FBO delete id=%u read=%d draw=%d current=%d recycle=%d",
+                                         t, was_read, was_draw, was_current, globals4es.recyclefbo);
+                    }
+
+                    // Detach textures from the wrapper's ownership metadata.
+                    for (int j = 0; j < MAX_DRAW_BUFFERS; ++j) {
+                        if (fb->color[j] && fb->t_color[j] != GL_RENDERBUFFER) {
+                            gltexture_t* tex = gl4es_getTexture(fb->t_color[j], fb->color[j]);
+                            if (tex) {
+                                tex->binded_fbo = 0;
+                                tex->binded_attachment = 0;
+                            }
+                        }
+                    }
+                    if (fb->depth && fb->t_depth != GL_RENDERBUFFER) {
+                        gltexture_t* tex = gl4es_getTexture(fb->t_depth, fb->depth);
+                        if (tex) {
+                            tex->binded_fbo = 0;
+                            tex->binded_attachment = 0;
+                            tex->renderdepth = 0;
+                        }
+                    }
+                    if (fb->stencil && fb->t_stencil != GL_RENDERBUFFER) {
+                        gltexture_t* tex = gl4es_getTexture(fb->t_stencil, fb->stencil);
+                        if (tex) {
+                            tex->binded_fbo = 0;
+                            tex->binded_attachment = 0;
+                            tex->renderstencil = 0;
+                        }
+                    }
+                    free(fb);
+                    kh_del(framebufferlist_t, glstate->fbo.framebufferlist, k);
                 }
             }
         }
+    }
 
     if (globals4es.recyclefbo) {
         DBG(SHUT_LOGD("Recycling %i FBOs\n", n);)
         noerrorShim();
+        // Be defensive if recycling was enabled dynamically after state creation.
+        if (!glstate->fbo.old) glstate->fbo.old = (oldfbos_t*)calloc(1, sizeof(oldfbos_t));
+        if (!glstate->fbo.old) {
+            LOAD_GLES2_OR_OES(glDeleteFramebuffers);
+            gles_glDeleteFramebuffers(n, framebuffers);
+            errorShim(GL_OUT_OF_MEMORY);
+            zomdroid_fbo_bind_forget();
+            return;
+        }
         if (glstate->fbo.old->cap == 0) {
             glstate->fbo.old->cap = 16;
             glstate->fbo.old->fbos = (GLuint*)malloc(glstate->fbo.old->cap * sizeof(GLuint));
@@ -228,29 +259,36 @@ void APIENTRY_GL4ES gl4es_glDeleteFramebuffers(GLsizei n, GLuint* framebuffers) 
         errorGL();
         gles_glDeleteFramebuffers(n, framebuffers);
     }
+    // A native delete may change bindings implicitly; never let the bind cache
+    // suppress the first explicit bind performed by the next map renderer.
+    zomdroid_fbo_bind_forget();
 }
 
 GLboolean APIENTRY_GL4ES gl4es_glIsFramebuffer(GLuint framebuffer) {
     DBG(SHUT_LOGD("glIsFramebuffer(%u)\n", framebuffer);)
     LOAD_GLES2_OR_OES(glIsFramebuffer);
 
+    if (framebuffer == 0) {
+        noerrorShim();
+        return GL_FALSE;
+    }
     errorGL();
     return find_framebuffer(framebuffer) != NULL;
 }
 
 GLenum APIENTRY_GL4ES gl4es_glCheckFramebufferStatus(GLenum target) {
-    GLenum result;
-    if (glstate->fbo.internal) {
-        result = glstate->fbo.fb_status;
-        noerrorShim();
-    } else {
-        LOAD_GLES2_OR_OES(glCheckFramebufferStatus);
-
-        errorGL();
-        GLenum rtarget = target;
-        if (target == GL_READ_FRAMEBUFFER) return GL_FRAMEBUFFER_COMPLETE; // cheating here
-        if (target == GL_DRAW_FRAMEBUFFER) rtarget = GL_FRAMEBUFFER;
-        result = gles_glCheckFramebufferStatus(rtarget);
+    LOAD_GLES2_OR_OES(glCheckFramebufferStatus);
+    errorGL();
+    GLenum rtarget = target;
+    if (hardext.esversion < 3 && target != GL_FRAMEBUFFER) rtarget = GL_FRAMEBUFFER;
+    GLenum result = gles_glCheckFramebufferStatus(rtarget);
+    static int pridroid_status_log_budget = 48;
+    if (pridroid_status_log_budget > 0) {
+        --pridroid_status_log_budget;
+        zomdroid_gltrace("PRIDROID FBO status target=0x%04x result=0x%04x read=%u draw=%u",
+                         target, result,
+                         glstate->fbo.fbo_read ? glstate->fbo.fbo_read->id : 0,
+                         glstate->fbo.fbo_draw ? glstate->fbo.fbo_draw->id : 0);
     }
     DBG(SHUT_LOGD("glCheckFramebufferStatus(0x%04X)=0x%04X\n", target, result);)
     return result;
@@ -291,19 +329,15 @@ void APIENTRY_GL4ES gl4es_glBindFramebuffer(GLenum target, GLuint framebuffer) {
     if (target == GL_FRAMEBUFFER) {
         glstate->fbo.fbo_read = fb;
         glstate->fbo.fbo_draw = fb;
-        glstate->fbo.fb_status = GL_FRAMEBUFFER_COMPLETE;
-        glstate->fbo.internal = 1;
     } else if (target == GL_READ_FRAMEBUFFER) {
         glstate->fbo.fbo_read = fb;
-        glstate->fbo.fb_status = GL_FRAMEBUFFER_COMPLETE;
-        glstate->fbo.internal = 1;
     } else if (target == GL_DRAW_FRAMEBUFFER) {
         glstate->fbo.fbo_draw = fb;
-        glstate->fbo.internal = 0;
     } else {
         errorShim(GL_INVALID_ENUM);
         return;
     }
+    glstate->fbo.internal = 0;
 
     GLuint znative = framebuffer ? framebuffer : glstate->fbo.mainfbo_fbo;
     glstate->fbo.current_fb = fb;
@@ -391,20 +425,20 @@ void SetAttachment(glframebuffer_t* fb, GLenum attachment, GLenum atttarget, GLu
     case GL_DEPTH_ATTACHMENT:
         fb->depth = att;
         fb->t_depth = atttarget;
-        fb->l_depth = 0;
+        fb->l_depth = level;
         break;
     case GL_STENCIL_ATTACHMENT:
         fb->stencil = att;
         fb->t_stencil = atttarget;
-        fb->l_stencil = 0;
+        fb->l_stencil = level;
         break;
     case GL_DEPTH_STENCIL_ATTACHMENT:
         fb->depth = att;
         fb->t_depth = atttarget;
-        fb->l_depth = 0;
+        fb->l_depth = level;
         fb->stencil = att;
         fb->t_stencil = atttarget;
-        fb->l_stencil = 0;
+        fb->l_stencil = level;
         break;
     }
 }
