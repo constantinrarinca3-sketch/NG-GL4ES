@@ -61,7 +61,7 @@ void zomdroid_gltrace(const char* fmt, ...) {
     if (count > 12000) return;
     if (!init) {
         init = 1;
-        f = fopen("/data/data/com.zomdroid/files/gl_trace.txt", "w");
+        f = fopen("/data/data/com.pridroid/files/gl_trace.txt", "w");
         // ZOMDROID (Codex minimap audit): a flush per line turned load-time CONVERT
         // bursts into syscall storms. Buffer the file; flush only the lines whose
         // survival matters at crash time — everything else also mirrors to stderr,

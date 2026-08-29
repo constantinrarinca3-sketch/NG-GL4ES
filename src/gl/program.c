@@ -1122,7 +1122,7 @@ void APIENTRY_GL4ES gl4es_glLinkProgram(GLuint program) {
             {
                 static int zfs_budget = 10;
                 if (zfs_budget-- > 0) {
-                    FILE* zf = fopen("/data/data/com.zomdroid/files/failed_shaders.txt", "a");
+                    FILE* zf = fopen("/data/data/com.pridroid/files/failed_shaders.txt", "a");
                     if (zf) {
                         fprintf(zf, "\n======== PROGRAM %u LINK FAILED ========\n", program);
                         for (int zi = 0; zi < glprogram->attach_size; zi++) {

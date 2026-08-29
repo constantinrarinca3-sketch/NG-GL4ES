@@ -281,7 +281,7 @@ static char* zomdroid_floatify_builtin_args(char* src) {
 // harmless (key = content); the dir can always be deleted.
 #include <sys/stat.h>
 int zccache_hits = 0, zccache_miss = 0;
-static const char* ZCC_DIR = "/data/data/com.zomdroid/files/ngg_convcache";
+static const char* ZCC_DIR = "/data/data/com.pridroid/files/ngg_convcache";
 static int zcc_enabled(void) {
     // RELEASE SAFETY (2026-07-29): a fresh SIGSEGV (si_addr=0xd, save-load, exactly one
     // cache hit in the run) implicates the hit path. Until that autopsy is done the
@@ -1718,7 +1718,7 @@ void APIENTRY_GL4ES gl4es_glCompileShader(GLuint shader) {
                 zomdroid_gltrace("COMPILE shader=%u native=%u status=%d ms=%ld", shader, glshader->id, status, zcpms);
                 if (status != GL_TRUE) {
                     // full failing source + driver log into the field-readable dump
-                    FILE* zf = fopen("/data/data/com.zomdroid/files/failed_shaders.txt", "a");
+                    FILE* zf = fopen("/data/data/com.pridroid/files/failed_shaders.txt", "a");
                     if (zf) {
                         char zlog[1024];
                         GLint zlen = 0;
