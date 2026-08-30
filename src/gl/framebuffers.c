@@ -157,12 +157,18 @@ void zomdroid_fbo_bind_forget(void) {
 void APIENTRY_GL4ES gl4es_glDeleteFramebuffers(GLsizei n, GLuint* framebuffers) {
     DBG(SHUT_LOGD("glDeleteFramebuffers(%i, %p), framebuffers[0]=%u\n", n, framebuffers, framebuffers[0]);)
     zomdroid_fbo_bind_forget();
+    // ZOMDROID FIX (field 2026-08-22): the pass below used to sit inside a second,
+    // identical loop over the same n framebuffers -- both counters were named i, so the
+    // inner one shadowed the outer and the whole deletion ran n times. After the first
+    // pass every name is gone from the hash, so the repeats found nothing and were
+    // harmless, but they turned a batch delete into quadratic work over dead entries.
+    int zwas_bound = 0;
     // delete tracking
     if (glstate->fbo.framebufferlist)
         for (int i = 0; i < n; i++) {
             khint_t k;
             glframebuffer_t* fb;
-            for (int i = 0; i < n; i++) {
+            {
                 GLuint t = framebuffers[i];
                 if (t) {
                     k = kh_get(framebufferlist_t, glstate->fbo.framebufferlist, t);
@@ -194,14 +200,21 @@ void APIENTRY_GL4ES gl4es_glDeleteFramebuffers(GLsizei n, GLuint* framebuffers) 
                                 tex->renderstencil = 0;
                             }
                         }
+                        // ZOMDROID FIX: these used to be set to NULL. GL says deleting
+                        // the bound framebuffer rebinds the default one, and the rest of
+                        // this file dereferences the three pointers without a check
+                        // (glDrawBuffer reads fbo_draw->id), so a NULL here is a mine.
                         if (glstate->fbo.current_fb == fb) {
-                            glstate->fbo.current_fb = 0;
+                            glstate->fbo.current_fb = glstate->fbo.fbo_0;
+                            zwas_bound = 1;
                         }
                         if (glstate->fbo.fbo_read == fb) {
-                            glstate->fbo.fbo_read = 0;
+                            glstate->fbo.fbo_read = glstate->fbo.fbo_0;
+                            zwas_bound = 1;
                         }
                         if (glstate->fbo.fbo_draw == fb) {
-                            glstate->fbo.fbo_draw = 0;
+                            glstate->fbo.fbo_draw = glstate->fbo.fbo_0;
+                            zwas_bound = 1;
                         }
                         free(fb);
                         kh_del(framebufferlist_t, glstate->fbo.framebufferlist, k);
@@ -213,6 +226,12 @@ void APIENTRY_GL4ES gl4es_glDeleteFramebuffers(GLsizei n, GLuint* framebuffers) 
     if (globals4es.recyclefbo) {
         DBG(SHUT_LOGD("Recycling %i FBOs\n", n);)
         noerrorShim();
+        // ZOMDROID FIX (SIGSEGV addr 0xC): NewGLState allocates this pool only when the
+        // flag is already set. The flag is now read before gl_init(), but recycling can
+        // still be switched on at runtime through GL_RECYCLEFBO_HINT_GL4ES, so build the
+        // pool on first use rather than trusting that it exists.
+        if (!glstate->fbo.old) glstate->fbo.old = (oldfbos_t*)calloc(1, sizeof(oldfbos_t));
+        if (!glstate->fbo.old) return;
         if (glstate->fbo.old->cap == 0) {
             glstate->fbo.old->cap = 16;
             glstate->fbo.old->fbos = (GLuint*)malloc(glstate->fbo.old->cap * sizeof(GLuint));
@@ -228,6 +247,12 @@ void APIENTRY_GL4ES gl4es_glDeleteFramebuffers(GLsizei n, GLuint* framebuffers) 
         errorGL();
         gles_glDeleteFramebuffers(n, framebuffers);
     }
+    // ZOMDROID FIX: whichever branch ran, the driver must not be left bound to a name we
+    // just retired. Recycling never calls the real glDeleteFramebuffers, so the dead name
+    // would simply stay bound; the other branch has the driver fall back to native 0,
+    // which on Android is the window surface and not our main FBO. Both disagree with the
+    // fbo_0 restored above, so bind the default explicitly and let the state match.
+    if (zwas_bound) zomdroid_fbo_bind_native_do(GL_FRAMEBUFFER, glstate->fbo.mainfbo_fbo);
 }
 
 GLboolean APIENTRY_GL4ES gl4es_glIsFramebuffer(GLuint framebuffer) {

@@ -374,6 +374,13 @@ void initialize_gl4es() {
     glx_init();
 #endif
 
+    // ZOMDROID FIX (SIGSEGV at glDeleteFramebuffers+124, addr 0xC, field 2026-08-22):
+    // this used to be read AFTER gl_init(). NewGLState() allocates the recycling pool
+    // only when the flag is already set, so with LIBGL_RECYCLEFBO=1 the pool stayed
+    // NULL while the flag read as true, and the first glDeleteFramebuffers dereferenced
+    // glstate->fbo.old->cap -- NULL + 12, exactly the reported fault address.
+    env(LIBGL_RECYCLEFBO, globals4es.recyclefbo, "Recycling of FBO enabled");
+
     gl_init();
 
 #ifdef GL4ES_COMPILE_FOR_USE_IN_SHARED_LIB
@@ -382,8 +389,6 @@ void initialize_gl4es() {
     agl_reset_internals();
 #endif
 #endif
-
-    env(LIBGL_RECYCLEFBO, globals4es.recyclefbo, "Recycling of FBO enabled");
 
     // Texture hacks
     globals4es.automipmap = ReturnEnvVarInt("LIBGL_MIPMAP");
@@ -916,7 +921,7 @@ void initialize_gl4es() {
     // verify WHICH renderer actually loaded (Zomdroid resets the choice on new instances).
     {
         extern void zomdroid_gltrace(const char* fmt, ...);
-        zomdroid_gltrace("INIT ng_gl4es RC42-PLAY (probe the non-constant-initializer extension instead of trusting it), noerror=%d",
+        zomdroid_gltrace("INIT ng_gl4es RC43-PLAY (RC42 + glDeleteFramebuffers: init order, single pass, default FBO restored), noerror=%d",
                          globals4es.noerror);
         {
             extern void zomdroid_exit_probe_register(void);
