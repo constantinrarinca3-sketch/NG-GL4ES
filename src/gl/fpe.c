@@ -12,6 +12,7 @@
 #include "program.h"
 #include "shader.h"
 #include "shaderconv.h"
+#include "pridroid_diag.h"
 
 #include "fpe.h"
 extern void zomdroid_fbo_bind_native_do(GLenum target, GLuint id);
@@ -800,6 +801,7 @@ void APIENTRY_GL4ES fpe_glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     scratch_t scratch = {0};
     realize_glenv(mode == GL_POINTS, first, count, 0, NULL, &scratch);
     LOAD_GLES(glDrawArrays);
+    pridroid_ng_diag_driver_draw(mode, count, 1);
     gles_glDrawArrays(mode, first, count);
     free_scratch(&scratch);
 }
@@ -819,6 +821,7 @@ void APIENTRY_GL4ES fpe_glDrawElements(GLenum mode, GLsizei count, GLenum type, 
         DBG(SHUT_LOGD("Using VBO %d for indices\n", glstate->vao->elements->real_buffer);)
     }
     realize_bufferIndex();
+    pridroid_ng_diag_driver_draw(mode, count, 1);
     gles_glDrawElements(mode, count, type, indices);
     if (use_vbo) wantBufferIndex(0);
     free_scratch(&scratch);
@@ -867,6 +870,7 @@ void APIENTRY_GL4ES fpe_glDrawArraysInstanced(GLenum mode, GLint first, GLsizei 
                     }
                 }
             }
+        pridroid_ng_diag_driver_draw(mode, count, 1);
         gles_glDrawArrays(mode, first, count);
     }
     free_scratch(&scratch);
@@ -928,6 +932,7 @@ void APIENTRY_GL4ES fpe_glDrawElementsInstanced(GLenum mode, GLsizei count, GLen
                     }
                 }
             }
+        pridroid_ng_diag_driver_draw(mode, count, 1);
         gles_glDrawElements(mode, count, type, inds);
     }
     if (use_vbo) wantBufferIndex(0);

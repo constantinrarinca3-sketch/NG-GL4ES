@@ -9,6 +9,7 @@
 #include "list.h"
 #include "loader.h"
 #include "logs.h"
+#include "pridroid_diag.h"
 #include "render.h"
 
 // #define DEBUG
@@ -450,9 +451,10 @@ if(count>500000) return;
 
         // POLYGON mode as LINE is "intercepted" and drawn using list
         if (instancecount == 1 || hardext.esversion == 1) {
-            if (!iindices && !sindices)
+            if (!iindices && !sindices) {
+                pridroid_ng_diag_driver_draw(mode, count, 1);
                 gles_glDrawArrays(mode, first, count);
-            else {
+            } else {
                 // ZOMDROID FIX (proven by gl_trace 2026-07-02: 3001/3001 draws failed 0x502 with
                 // native ebo=783 bound): sindices/iindices are CLIENT-side pointers here; with an
                 // EBO natively bound the pointer is treated as an offset -> GL_INVALID_OPERATION
@@ -460,6 +462,7 @@ if(count>500000) return;
                 // Force native GL_ELEMENT_ARRAY_BUFFER = 0 for this draw, restore after.
                 GLuint zfix_old = wantBufferIndex(0);
                 realize_bufferIndex();
+                pridroid_ng_diag_driver_draw(mode, count, 1);
                 gles_glDrawElements(mode, count, (sindices) ? GL_UNSIGNED_SHORT : GL_UNSIGNED_INT,
                                     (sindices ? ((void*)sindices) : ((void*)iindices)));
                 wantBufferIndex(zfix_old);
@@ -615,6 +618,7 @@ void APIENTRY_GL4ES gl4es_glDrawElements(GLenum mode, GLsizei count, GLenum type
         noerrorShim();
         return;
     }
+    pridroid_ng_diag_api_draw(mode, count, 1);
 
     bool compiling = (glstate->list.active);
     bool intercept = should_intercept_render(mode);
@@ -725,6 +729,7 @@ void APIENTRY_GL4ES gl4es_glDrawArrays(GLenum mode, GLint first, GLsizei count) 
         noerrorShim();
         return;
     }
+    pridroid_ng_diag_api_draw(mode, count, 1);
 
     // special case for (very) large GL_QUADS array
     if ((mode == GL_QUADS) && (count > 4 * 8000)) {
@@ -949,7 +954,10 @@ void APIENTRY_GL4ES gl4es_glMultiDrawElements(GLenum mode, GLsizei* counts, GLen
 
     DBG(SHUT_LOGD("gles_glDrawElements loop x%d\n", primcount);)
     for (int i = 0; i < primcount; i++) {
-        if (counts[i] > 0) gles_glDrawElements(mode, counts[i], type, indices[i]);
+        if (counts[i] > 0) {
+            pridroid_ng_diag_driver_draw(mode, counts[i], 1);
+            gles_glDrawElements(mode, counts[i], type, indices[i]);
+        }
     }
 }
 AliasExport(void, glMultiDrawElements, ,
@@ -1070,6 +1078,7 @@ void internal_glDrawElementsBaseVertex_gles32(GLenum mode, GLsizei count, GLenum
                   PrintEnum(mode), count, PrintEnum(type), indices, basevertex, (glstate->list.active) ? 1 : 0,
                   glstate->list.pending);)
     LOAD_GLES3_OR_EXT(glDrawElementsBaseVertex);
+    pridroid_ng_diag_driver_draw(mode, count, 1);
     gles_glDrawElementsBaseVertex(mode, count, type, indices, basevertex);
 }
 
@@ -1108,7 +1117,10 @@ void internal_glMultiDrawElementsBaseVertex_gles32(GLenum mode, const GLsizei* c
 
     DBG(SHUT_LOGD("gles_glDrawElementsBaseVertex loop x%d\n", primcount);)
     for (int i = 0; i < primcount; i++) {
-        if (counts[i] > 0) gles_glDrawElementsBaseVertex(mode, counts[i], type, indices[i], basevertex[i]);
+        if (counts[i] > 0) {
+            pridroid_ng_diag_driver_draw(mode, counts[i], 1);
+            gles_glDrawElementsBaseVertex(mode, counts[i], type, indices[i], basevertex[i]);
+        }
     }
 }
 

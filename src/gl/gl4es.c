@@ -25,6 +25,7 @@
 #include "matrix.h"
 #include "buffers.h"
 #include "logs.h"
+#include "pridroid_diag.h"
 #include "config.h"
 
 #ifdef _WIN32
@@ -947,6 +948,7 @@ AliasExport(void, glEndList, , ());
 
 renderlist_t* append_calllist(renderlist_t* list, renderlist_t* a);
 void APIENTRY_GL4ES gl4es_glCallList(GLuint list) {
+    pridroid_ng_diag_display_list();
     noerrorShim();
     if (glstate->list.active) {
         glstate->list.active = append_calllist(glstate->list.active, gl4es_glGetList(list));
@@ -1208,6 +1210,8 @@ AliasExport(void, glColorMask, , (GLboolean red, GLboolean green, GLboolean blue
 typedef void (*glColorMaskiEXT_PTR)(GLuint buf, GLboolean r, GLboolean g, GLboolean b, GLboolean a);
 void gl4es_glClear(GLbitfield mask) {
     PUSH_IF_COMPILING(glClear);
+
+    pridroid_ng_diag_clear(mask);
 
 //    mask &= GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT;
     LOAD_GLES(glClear);

@@ -11,6 +11,7 @@
 #include "texgen.h"
 #include "render.h"
 #include "fpe.h"
+#include "pridroid_diag.h"
 
 /* return 1 if failed, 2 if succeed */
 typedef struct array2vbo_s {
@@ -749,6 +750,7 @@ void draw_renderlist(renderlist_t *list) {
                         list->ind_line = k;
                     }
                     bindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+                    pridroid_ng_diag_driver_draw(mode, list->ind_line, 1);
                     gles_glDrawElements(mode, list->ind_line, GL_UNSIGNED_SHORT, list->ind_lines);
                     use_vbo_indices = 1;
                 } else {
@@ -767,11 +769,14 @@ void draw_renderlist(renderlist_t *list) {
                         vbo_indices = 1;
                     } else
                         realize_bufferIndex();
-                    if(list->instanceCount==1)
+                    if(list->instanceCount==1) {
+                        pridroid_ng_diag_driver_draw(mode, list->ilen, 1);
                         gles_glDrawElements(mode, list->ilen, GL_UNSIGNED_SHORT, vbo_indices?NULL:indices);
-                    else {
-                        for (glstate->instanceID=0; glstate->instanceID<list->instanceCount; ++glstate->instanceID)
+                    } else {
+                        for (glstate->instanceID=0; glstate->instanceID<list->instanceCount; ++glstate->instanceID) {
+                            pridroid_ng_diag_driver_draw(mode, list->ilen, 1);
                             gles_glDrawElements(mode, list->ilen, GL_UNSIGNED_SHORT, vbo_indices?NULL:indices);
+                        }
                         glstate->instanceID = 0;
                     }
                 }
@@ -796,13 +801,17 @@ void draw_renderlist(renderlist_t *list) {
                         list->ind_line = k;
                     }
                     bindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+					pridroid_ng_diag_driver_draw(mode, list->ind_line, 1);
 					gles_glDrawElements(mode, list->ind_line, GL_UNSIGNED_SHORT, list->ind_lines);
                 } else {
-                    if(list->instanceCount==1)
+                    if(list->instanceCount==1) {
+                        pridroid_ng_diag_driver_draw(mode, len, 1);
                         gles_glDrawArrays(mode, 0, len);
-                    else {
-                        for (glstate->instanceID=0; glstate->instanceID<list->instanceCount; ++glstate->instanceID)
+                    } else {
+                        for (glstate->instanceID=0; glstate->instanceID<list->instanceCount; ++glstate->instanceID) {
+                            pridroid_ng_diag_driver_draw(mode, len, 1);
                             gles_glDrawArrays(mode, 0, len);
+                        }
                         glstate->instanceID = 0;
                     }
                 }

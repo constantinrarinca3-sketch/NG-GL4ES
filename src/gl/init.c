@@ -918,7 +918,7 @@ void initialize_gl4es() {
     // verify WHICH renderer actually loaded (Zomdroid resets the choice on new instances).
     {
         extern void zomdroid_gltrace(const char* fmt, ...);
-        zomdroid_gltrace("INIT ng_gl4es PRIDROID-FBO1-PATH1 (safe framebuffer teardown/recycle, PriDroid paths), noerror=%d",
+        zomdroid_gltrace("INIT ng_gl4es PRIDROID-FBO1-PATH1-DIAG1 (safe FBO lifecycle, PriDroid paths, draw/state flight recorder), noerror=%d",
                          globals4es.noerror);
         {
             extern void zomdroid_exit_probe_register(void);

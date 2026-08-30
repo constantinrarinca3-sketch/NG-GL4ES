@@ -9,6 +9,7 @@
 #include "init.h"
 #include "loader.h"
 #include "logs.h"
+#include "pridroid_diag.h"
 #ifdef TEXSTREAM
 # ifndef GL_TEXTURE_STREAM_IMG
 # define GL_TEXTURE_STREAM_IMG                                   0x8C0D
@@ -164,6 +165,7 @@ void gl4es_blitTexture_gles1(GLuint texture,
         fpe_glDisableClientState(GL_COLOR_ARRAY);
         fpe_glDisableClientState(GL_NORMAL_ARRAY);
         static unsigned int idx[] = { 0, 1, 2, 1, 3, 2 };
+        pridroid_ng_diag_driver_draw(GL_TRIANGLES, 4, 1);
         gles_glDrawElements(GL_TRIANGLES, 4, GL_UNSIGNED_INT, idx);
 
         if(customvp)
@@ -352,6 +354,7 @@ void gl4es_blitTexture_gles2(GLuint texture,
     realize_blitenv(alpha);
 
     static unsigned int idx[] = { 0, 2, 1, 0, 3, 2 };
+    pridroid_ng_diag_driver_draw(GL_TRIANGLES, 6, 1);
     gles_glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, idx);
 }
 

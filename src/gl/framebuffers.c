@@ -1,4 +1,5 @@
 #include "logs.h"
+#include "pridroid_diag.h"
 #include "framebuffers.h"
  
 #if !defined(ANDROID) && !defined(AMIGAOS4) && !defined(__EMSCRIPTEN__) && !defined(__APPLE__)
@@ -1545,6 +1546,7 @@ void APIENTRY_GL4ES gl4es_glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX
     DBG(SHUT_LOGD("glBlitFramebuffer(%d, %d, %d, %d,  %d, %d, %d, %d,  0x%04X, %s) fbo_read=%d, fbo_draw=%d\n", srcX0,
                   srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, PrintEnum(filter), glstate->fbo.fbo_read->id,
                   glstate->fbo.fbo_draw->id);)
+    pridroid_ng_diag_blit();
     LOAD_GLES3(glBlitFramebuffer);
     gles_glBlitFramebuffer(srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter);
     return;

@@ -81,6 +81,7 @@ set(C_SRC_FILES
         src/gl/pointsprite.c
         src/gl/preproc.c
         src/gl/program.c
+        src/gl/pridroid_diag.c
         src/gl/queries.c
         src/gl/raster.c
         src/gl/render.c
