@@ -1,0 +1,398 @@
+// ZOMDROID ETC2 (ported 2026-08-31 from our own RimDroid fork, rd_etc2.c -- same author,
+// no license concerns). CPU encoder: RGBA8/RGB8 pixels in, ETC2 blocks out. ETC1-subset
+// color (individual/differential; no T/H/planar -- plenty for PZ sprites) + EAC alpha.
+// Against uncompressed RGBA8 this is 4:1 (1 byte/px), against opaque RGB 8:1 via RGB8_ETC2.
+// The point: FULL resolution at (better than) shrink=1 memory -- the road to playing
+// without LIBGL_SHRINK.
+//
+// Field lessons inherited from the RimDroid deployment, do not relearn them:
+//  - the encoder must be compiled optimized (this tree builds -O2 globally, verified);
+//    at -O0 the full search once turned an atlas bake into a SIGKILLed 10-minute stall;
+//  - uniform blocks (flat fills, atlas padding) take a one-quantization fast path;
+//  - the ETC1 table search tries only the 3 tables bracketing the actual max deviation;
+//  - cumulative encode time is counted, because a slowness complaint needs a NUMBER.
+#include <stdint.h>
+#include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+#include "zomdroid_etc2.h"
+
+// Cumulative wall time spent inside zetc2_etc2_encode, in milliseconds. The Tecno report ("fps
+// halved with ETC2") needs a NUMBER, not a theory: the caller logs this every N textures, so a
+// field log states the price outright — and doubles as the build fingerprint (version strings
+// don't change between test builds; the watchdog taught us that lesson).
+static uint64_t zetc2_etc2_total_ns = 0;
+long zomdroid_etc2_n = 0; // textures encoded this session (for the exit summary)
+uint64_t zomdroid_etc2_total_ms(void) { return zetc2_etc2_total_ns / 1000000u; }
+
+static const int zetc2_etc1_mod[8][2] = {{2,8},{5,17},{9,29},{13,42},{18,60},{24,80},{33,106},{47,183}};
+static const int8_t zetc2_eac_mod[16][8] = {
+    {-3,-6,-9,-15,2,5,8,14},{-3,-7,-10,-13,2,6,9,12},{-2,-5,-8,-13,1,4,7,12},{-2,-4,-6,-13,1,3,5,12},
+    {-3,-6,-8,-12,2,5,7,11},{-3,-7,-9,-11,2,6,8,10},{-4,-7,-8,-11,3,6,7,10},{-3,-5,-8,-11,2,4,7,10},
+    {-2,-6,-8,-10,1,5,7,9},{-2,-5,-8,-10,1,4,7,9},{-2,-4,-8,-10,1,3,7,9},{-2,-5,-7,-10,1,4,6,9},
+    {-3,-4,-7,-10,2,3,6,9},{-1,-2,-3,-10,0,1,2,9},{-4,-6,-8,-9,3,5,7,8},{-3,-5,-7,-9,2,4,6,8}};
+
+static inline int zetc2_clamp255(int v) { return v < 0 ? 0 : (v > 255 ? 255 : v); }
+
+/* Encode one 4x4 RGB block (px[16][3], col-major p = x*4+y) into ETC1-subset bits. */
+static void zetc2_etc1_encode_block(const uint8_t px[16][3], uint8_t out[8]) {
+    // Fast path: a uniform block needs no search — both subblocks share the quantized base,
+    // every pixel takes the smallest modifier (+2 from table 0; max error 2 per channel).
+    int uniform = 1;
+    for (int p = 1; p < 16 && uniform; p++)
+        uniform = px[p][0] == px[0][0] && px[p][1] == px[0][1] && px[p][2] == px[0][2];
+    if (uniform) {
+        int b5[3];
+        for (int k = 0; k < 3; k++) b5[k] = (px[0][k] * 31 + 127) / 255;
+        out[0] = (uint8_t)(b5[0] << 3);          /* delta 0 */
+        out[1] = (uint8_t)(b5[1] << 3);
+        out[2] = (uint8_t)(b5[2] << 3);
+        out[3] = 2;                              /* tables 0/0, diff mode, no flip */
+        out[4] = 0; out[5] = 0;                  /* all indices 00 = +a (+2) */
+        out[6] = 0; out[7] = 0;
+        return;
+    }
+    int best_err = 0x7fffffff;
+    for (int flip = 0; flip < 2; flip++) {
+        int avg[2][3] = {{0,0,0},{0,0,0}};
+        for (int p = 0; p < 16; p++) {
+            int sub = flip ? ((p & 3) >> 1) : (p >> 3);
+            for (int k = 0; k < 3; k++) avg[sub][k] += px[p][k];
+        }
+        for (int s = 0; s < 2; s++) for (int k = 0; k < 3; k++) avg[s][k] = (avg[s][k] + 4) / 8;
+        int b5[2][3], diff_ok = 1;
+        for (int k = 0; k < 3; k++) {
+            b5[0][k] = (avg[0][k] * 31 + 127) / 255;
+            b5[1][k] = (avg[1][k] * 31 + 127) / 255;
+            int d = b5[1][k] - b5[0][k];
+            if (d < -4 || d > 3) diff_ok = 0;
+        }
+        int base[2][3];
+        if (diff_ok) {
+            for (int s = 0; s < 2; s++) for (int k = 0; k < 3; k++)
+                base[s][k] = (b5[s][k] << 3) | (b5[s][k] >> 2);
+        } else {
+            for (int s = 0; s < 2; s++) for (int k = 0; k < 3; k++) {
+                int q = (avg[s][k] * 15 + 127) / 255;
+                base[s][k] = (q << 4) | q;
+            }
+        }
+        int tbl[2] = {0,0}; uint32_t idx[2] = {0,0}; int err_total = 0;
+        for (int s = 0; s < 2; s++) {
+            // Table preselect: the tables are sorted by magnitude; only the ones bracketing the
+            // subblock's max per-channel deviation from base can win. Try [t-1, t, t+1].
+            int maxdev = 0;
+            for (int p = 0; p < 16; p++) {
+                int sub = flip ? ((p & 3) >> 1) : (p >> 3);
+                if (sub != s) continue;
+                for (int k = 0; k < 3; k++) {
+                    int d = px[p][k] - base[s][k];
+                    if (d < 0) d = -d;
+                    if (d > maxdev) maxdev = d;
+                }
+            }
+            int t_pick = 7;
+            for (int t = 0; t < 8; t++) if (zetc2_etc1_mod[t][1] >= maxdev) { t_pick = t; break; }
+            int t_lo = t_pick > 0 ? t_pick - 1 : 0;
+            int t_hi = t_pick < 7 ? t_pick + 1 : 7;
+            int best_sub = 0x7fffffff, best_t = t_lo; uint32_t best_idx = 0;
+            for (int t = t_lo; t <= t_hi; t++) {
+                int e_sum = 0; uint32_t ind = 0;
+                for (int p = 0; p < 16; p++) {
+                    int sub = flip ? ((p & 3) >> 1) : (p >> 3);
+                    if (sub != s) continue;
+                    int be = 0x7fffffff, bi = 0;
+                    for (int m = 0; m < 4; m++) {
+                        int mod = (m & 1) ? zetc2_etc1_mod[t][1] : zetc2_etc1_mod[t][0];
+                        if (m & 2) mod = -mod;
+                        int e = 0;
+                        for (int k = 0; k < 3; k++) {
+                            int d = px[p][k] - zetc2_clamp255(base[s][k] + mod);
+                            e += d * d;
+                        }
+                        if (e < be) { be = e; bi = ((m & 2) ? 2 : 0) | (m & 1); }
+                    }
+                    e_sum += be;
+                    ind |= (uint32_t)bi << (2 * p);
+                }
+                if (e_sum < best_sub) { best_sub = e_sum; best_t = t; best_idx = ind; }
+            }
+            tbl[s] = best_t; idx[s] = best_idx; err_total += best_sub;
+        }
+        if (err_total < best_err) {
+            best_err = err_total;
+            uint8_t o[8] = {0};
+            if (diff_ok) {
+                o[0] = (uint8_t)((b5[0][0] << 3) | ((b5[1][0] - b5[0][0]) & 7));
+                o[1] = (uint8_t)((b5[0][1] << 3) | ((b5[1][1] - b5[0][1]) & 7));
+                o[2] = (uint8_t)((b5[0][2] << 3) | ((b5[1][2] - b5[0][2]) & 7));
+            } else {
+                o[0] = (uint8_t)(((base[0][0] >> 4) << 4) | (base[1][0] >> 4));
+                o[1] = (uint8_t)(((base[0][1] >> 4) << 4) | (base[1][1] >> 4));
+                o[2] = (uint8_t)(((base[0][2] >> 4) << 4) | (base[1][2] >> 4));
+            }
+            o[3] = (uint8_t)((tbl[0] << 5) | (tbl[1] << 2) | (diff_ok ? 2 : 0) | flip);
+            uint16_t msb = 0, lsb = 0;
+            uint32_t all = idx[0] | idx[1];
+            for (int p = 0; p < 16; p++) {
+                uint32_t bi = (all >> (2 * p)) & 3;
+                if (bi & 2) msb |= (uint16_t)(1u << p);
+                if (bi & 1) lsb |= (uint16_t)(1u << p);
+            }
+            o[4] = (uint8_t)(msb >> 8); o[5] = (uint8_t)(msb & 0xff);
+            o[6] = (uint8_t)(lsb >> 8); o[7] = (uint8_t)(lsb & 0xff);
+            memcpy(out, o, 8);
+        }
+    }
+}
+
+/* Encode one 4x4 alpha block (a[16], col-major) into EAC bits. Bounded search. */
+static void zetc2_eac_encode_block(const uint8_t a[16], uint8_t out[8]) {
+    int amin = 255, amax = 0;
+    for (int p = 0; p < 16; p++) { if (a[p] < amin) amin = a[p]; if (a[p] > amax) amax = a[p]; }
+    if (amin == amax) {   // flat alpha (fully opaque sprites dominate) — exact, no search
+        out[0] = (uint8_t)amin;
+        out[1] = (uint8_t)((1 << 4) | 13);       /* mult 1, table 13 has a 0 modifier at index 4 */
+        uint64_t bits = 0;
+        for (int p = 0; p < 16; p++) bits |= (uint64_t)4 << (45 - 3 * p);
+        for (int i = 0; i < 6; i++) out[2 + i] = (uint8_t)(bits >> (40 - 8 * i));
+        return;
+    }
+    int best_err = 0x7fffffff;
+    for (int t = 0; t < 16; t++) {
+        int span = zetc2_eac_mod[t][7] - zetc2_eac_mod[t][3];
+        int m0 = span ? (amax - amin + span / 2) / span : 1;
+        for (int dm = -1; dm <= 1; dm++) {
+            int mult = m0 + dm; if (mult < 1) mult = 1; if (mult > 15) mult = 15;
+            int b0 = (amin + amax) / 2 - mult * (zetc2_eac_mod[t][3] + zetc2_eac_mod[t][7]) / 2;
+            for (int db = -1; db <= 1; db++) {
+                int base = zetc2_clamp255(b0 + db);
+                int e_sum = 0; uint8_t sel[16];
+                for (int p = 0; p < 16; p++) {
+                    int be = 0x7fffffff, bs = 0;
+                    for (int s = 0; s < 8; s++) {
+                        int v = zetc2_clamp255(base + mult * zetc2_eac_mod[t][s]);
+                        int d = a[p] - v, e = d * d;
+                        if (e < be) { be = e; bs = s; }
+                    }
+                    e_sum += be; sel[p] = (uint8_t)bs;
+                }
+                if (e_sum < best_err) {
+                    best_err = e_sum;
+                    out[0] = (uint8_t)base;
+                    out[1] = (uint8_t)((mult << 4) | t);
+                    uint64_t bits = 0;
+                    for (int p = 0; p < 16; p++) bits |= (uint64_t)sel[p] << (45 - 3 * p);
+                    for (int i = 0; i < 6; i++) out[2 + i] = (uint8_t)(bits >> (40 - 8 * i));
+                }
+            }
+        }
+    }
+}
+
+const void* zomdroid_etc2_encode(uint32_t etc2fmt, int32_t w, int32_t h, const uint8_t* rgba, int stride,
+                                 size_t* out_sz) {
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    static _Thread_local uint8_t* ebuf = NULL; static _Thread_local size_t ecap = 0;
+    const int alpha = (etc2fmt == 0x9278u || etc2fmt == 0x9279u);
+    const int bs = alpha ? 16 : 8;
+    const int bw = (w + 3) / 4, bh = (h + 3) / 4;
+    size_t need = (size_t)bw * bh * bs;
+    if (!need || need > (128u << 20)) return NULL;
+    if (ecap < need) { void* nb = realloc(ebuf, need); if (!nb) return NULL; ebuf = (uint8_t*)nb; ecap = need; }
+    for (int by = 0; by < bh; by++) for (int bx = 0; bx < bw; bx++) {
+        uint8_t px[16][3], al[16];
+        for (int p = 0; p < 16; p++) {                       /* col-major p = x*4+y, edge clamp */
+            int x = bx * 4 + (p >> 2), y = by * 4 + (p & 3);
+            if (x >= w) x = w - 1;
+            if (y >= h) y = h - 1;
+            const uint8_t* s = rgba + ((size_t)y * w + x) * stride;
+            px[p][0] = s[0]; px[p][1] = s[1]; px[p][2] = s[2];
+            al[p] = (stride == 4) ? s[3] : 255;
+        }
+        uint8_t* o = ebuf + ((size_t)by * bw + bx) * bs;
+        if (alpha) { zetc2_eac_encode_block(al, o); zetc2_etc1_encode_block(px, o + 8); }
+        else zetc2_etc1_encode_block(px, o);
+    }
+    *out_sz = need;
+    zomdroid_etc2_n++;
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    zetc2_etc2_total_ns += (uint64_t)(t1.tv_sec - t0.tv_sec) * 1000000000u + (uint64_t)(t1.tv_nsec - t0.tv_nsec);
+    return ebuf;
+}
+
+// ---------------------------------------------------------------------------
+// Disk cache: measured 2026-08-31, one session cost 52.8 SECONDS of encoding
+// (6324 textures) paid in-frame during world streaming. Content-addressed --
+// the stream has no stable names, so the key is a 64-bit hash of the pixels
+// (+ format/size in the seed). One file per texture, written atomically
+// (tmp+rename), validated on read; anything wrong = silent miss + rewrite.
+// Identical tiles dedup by construction. LIBGL_ETC2CACHE=0 disables.
+// NOTE v1: no size cap; PZ world content measured ~0.3-0.8 GB compressed.
+// ---------------------------------------------------------------------------
+#include <stdio.h>
+#include <sys/stat.h>
+#include <errno.h>
+#include <dirent.h>
+#include <fcntl.h>
+
+long zomdroid_etc2_hits = 0;
+long zomdroid_etc2_evicted = 0;
+
+// ---- cap & LRU eviction (default 1.5 GB, LIBGL_ETC2CACHE_MB overrides) ----
+// The working set is live: one of her sessions HIT nearly the whole 879 MB store,
+// so the cap must clear the working set with headroom or the cache silently thrashes
+// into permanent re-encoding. Hits touch the file's mtime; eviction drops the oldest
+// mtime first. An evicted texture just re-encodes on next sight -- nothing breaks.
+static long long zetc2_total = -1; // bytes on disk, -1 = not measured yet
+static long long zetc2_cap(void) {
+    static long long cap = -1;
+    if (cap < 0) {
+        const char* e = getenv("LIBGL_ETC2CACHE_MB");
+        long mb = e ? atol(e) : 1536;
+        if (mb < 64) mb = 64;
+        cap = (long long)mb << 20;
+    }
+    return cap;
+}
+typedef struct { long long mtime; long long size; char name[24]; } zetc2_ent;
+static int zetc2_ent_cmp(const void* a, const void* b) {
+    long long d = ((const zetc2_ent*)a)->mtime - ((const zetc2_ent*)b)->mtime;
+    return d < 0 ? -1 : (d > 0 ? 1 : 0);
+}
+static void zetc2_scan_evict(const char* dir) {
+    DIR* d = opendir(dir);
+    if (!d) return;
+    zetc2_ent* v = NULL;
+    size_t n = 0, capn = 0;
+    long long total = 0;
+    struct dirent* de;
+    char path[224];
+    while ((de = readdir(d))) {
+        size_t ln = strlen(de->d_name);
+        if (ln < 4 || ln >= sizeof(v->name) || strcmp(de->d_name + ln - 3, ".e2")) continue;
+        snprintf(path, sizeof(path), "%s/%s", dir, de->d_name);
+        struct stat st;
+        if (stat(path, &st)) continue;
+        if (n == capn) {
+            capn = capn ? capn * 2 : 1024;
+            void* nv = realloc(v, capn * sizeof(zetc2_ent));
+            if (!nv) break;
+            v = (zetc2_ent*)nv;
+        }
+        v[n].mtime = st.st_mtime;
+        v[n].size = st.st_size;
+        memcpy(v[n].name, de->d_name, ln + 1);
+        n++;
+        total += st.st_size;
+    }
+    closedir(d);
+    if (v && total > zetc2_cap()) {
+        // oldest first; evict down to 15/16 of the cap so one new file does not
+        // immediately trigger the next full scan
+        qsort(v, n, sizeof(zetc2_ent), zetc2_ent_cmp);
+        long long floor_ = zetc2_cap() / 16 * 15;
+        for (size_t i = 0; i < n && total > floor_; i++) {
+            snprintf(path, sizeof(path), "%s/%s", dir, v[i].name);
+            if (!remove(path)) {
+                total -= v[i].size;
+                zomdroid_etc2_evicted++;
+            }
+        }
+    }
+    free(v);
+    zetc2_total = total;
+}
+static uint64_t zetc2_io_ns = 0;
+uint64_t zomdroid_etc2_io_ms(void) { return zetc2_io_ns / 1000000u; }
+
+static uint64_t zetc2_hash(const uint8_t* p, size_t n, uint64_t seed) {
+    uint64_t hh = seed ^ 0x9e3779b97f4a7c15ull;
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        uint64_t k;
+        memcpy(&k, p + i, 8);
+        hh ^= k;
+        hh *= 0xff51afd7ed558ccdull;
+        hh ^= hh >> 29;
+    }
+    for (; i < n; i++) {
+        hh ^= p[i];
+        hh *= 0x100000001b3ull;
+    }
+    hh ^= hh >> 32;
+    return hh;
+}
+
+const void* zomdroid_etc2_cached(uint32_t etc2fmt, int32_t w, int32_t h, const uint8_t* rgba, int stride,
+                                 size_t* out_sz) {
+    static _Thread_local uint8_t* lbuf = NULL;
+    static _Thread_local size_t lcap = 0;
+    static int dir_ok = -1;
+    static const char* dir = "/data/data/com.zomdroid/files/ngg_etc2cache";
+    if (dir_ok < 0) dir_ok = (mkdir(dir, 0700) == 0 || errno == EEXIST) ? 1 : 0;
+    if (!dir_ok) return zomdroid_etc2_encode(etc2fmt, w, h, rgba, stride, out_sz);
+
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    uint64_t hh = zetc2_hash(rgba, (size_t)w * h * stride,
+                             ((uint64_t)etc2fmt << 32) ^ ((uint64_t)(uint32_t)w << 16) ^ (uint32_t)h);
+    char path[192];
+    snprintf(path, sizeof(path), "%s/%016llx.e2", dir, (unsigned long long)hh);
+
+    FILE* f = fopen(path, "rb");
+    if (f) {
+        uint32_t hdr[4]; // magic 'NGE2', fmt, w<<16|h, payload bytes
+        if (fread(hdr, sizeof(hdr), 1, f) == 1 && hdr[0] == 0x4e474532u && hdr[1] == etc2fmt &&
+            hdr[2] == (((uint32_t)w << 16) | (uint32_t)h) && hdr[3] > 0 && hdr[3] <= (128u << 20)) {
+            if (lcap < hdr[3]) {
+                void* nb = realloc(lbuf, hdr[3]);
+                if (nb) {
+                    lbuf = (uint8_t*)nb;
+                    lcap = hdr[3];
+                }
+            }
+            if (lcap >= hdr[3] && fread(lbuf, 1, hdr[3], f) == hdr[3]) {
+                fclose(f);
+                zomdroid_etc2_hits++;
+                utimensat(AT_FDCWD, path, NULL, 0); // LRU: a hit makes the file young again
+                *out_sz = hdr[3];
+                clock_gettime(CLOCK_MONOTONIC, &t1);
+                zetc2_io_ns += (uint64_t)(t1.tv_sec - t0.tv_sec) * 1000000000u + (uint64_t)(t1.tv_nsec - t0.tv_nsec);
+                return lbuf;
+            }
+        }
+        fclose(f); // damaged or stale: treated as a miss, re-encoded and overwritten below
+    }
+
+    uint64_t enc_before = zetc2_etc2_total_ns;
+    const void* blocks = zomdroid_etc2_encode(etc2fmt, w, h, rgba, stride, out_sz);
+    if (blocks) {
+        char tmp[208];
+        snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+        FILE* o = fopen(tmp, "wb");
+        if (o) {
+            uint32_t hdr[4] = {0x4e474532u, etc2fmt, ((uint32_t)w << 16) | (uint32_t)h, (uint32_t)*out_sz};
+            int ok = fwrite(hdr, sizeof(hdr), 1, o) == 1 && fwrite(blocks, 1, *out_sz, o) == *out_sz;
+            ok = (fclose(o) == 0) && ok;
+            if (ok) {
+                rename(tmp, path);
+                if (zetc2_total < 0) zetc2_scan_evict(dir); // first write: measure what is there
+                else {
+                    zetc2_total += (long long)sizeof(uint32_t) * 4 + (long long)*out_sz;
+                    if (zetc2_total > zetc2_cap()) zetc2_scan_evict(dir);
+                }
+            } else
+                remove(tmp);
+        }
+    }
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    // io time = everything spent here except the encode itself (it counts its own time)
+    uint64_t total = (uint64_t)(t1.tv_sec - t0.tv_sec) * 1000000000u + (uint64_t)(t1.tv_nsec - t0.tv_nsec);
+    uint64_t enc = zetc2_etc2_total_ns - enc_before;
+    zetc2_io_ns += (total > enc) ? (total - enc) : 0;
+    return blocks;
+}

@@ -921,7 +921,7 @@ void initialize_gl4es() {
     // verify WHICH renderer actually loaded (Zomdroid resets the choice on new instances).
     {
         extern void zomdroid_gltrace(const char* fmt, ...);
-        zomdroid_gltrace("INIT ng_gl4es RC43-PLAY (RC42 + glDeleteFramebuffers: init order, single pass, default FBO restored), noerror=%d",
+        zomdroid_gltrace("INIT ng_gl4es RC48-SCOUT (ETC2 cache capped at 1.5GB, LRU eviction), noerror=%d",
                          globals4es.noerror);
         {
             extern void zomdroid_exit_probe_register(void);

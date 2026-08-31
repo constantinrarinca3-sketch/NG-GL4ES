@@ -1,5 +1,6 @@
 #include "logs.h"
 #include "texture.h"
+#include "zomdroid_etc2.h"
 
 #include "../glx/hardext.h"
 #include "../glx/streaming.h"
@@ -1149,6 +1150,85 @@ void APIENTRY_GL4ES gl4es_glTexImage2D(GLenum target, GLint level, GLint interna
             }
         }
     }
+    // ZOMDROID ETC2 (prototype, opt-in via LIBGL_ETC2=1): same eligibility as T16 below,
+    // but instead of 16-bit the pixels are ETC2-encoded at FULL resolution: 4 bytes/px
+    // -> 1 (RGBA) or 0.5 (opaque -> RGB8_ETC2). The upload goes through our own
+    // glCompressedTexImage2D, whose generic branch passes non-DXT formats straight to
+    // the driver with full bookkeeping. ES3-only (ETC2 is core there). Textures built
+    // by sub-uploads are never taken (data==NULL creations skip this), and a later
+    // glTexSubImage2D into an ETC2 texture is refused + logged, not silently corrupted.
+    if (data != NULL && target != GL_PROXY_TEXTURE_2D && width > 0 && height > 0 &&
+        type == GL_UNSIGNED_BYTE && (format == GL_RGBA || format == GL_RGB) &&
+        glstate->vao->unpack == NULL && glstate->texture.unpack_row_length == 0 &&
+        glstate->texture.unpack_skip_pixels == 0 && glstate->texture.unpack_skip_rows == 0 &&
+        globals4es.esversion >= 300) {
+        static int zetc2_on = -1;
+        if (zetc2_on < 0) {
+            const char* ze = getenv("LIBGL_ETC2");
+            zetc2_on = ze ? atoi(ze) : 0; // prototype: default OFF
+        }
+        gltexture_t* zeb = glstate->texture.bound[glstate->texture.active][what_target(target)];
+        if (zetc2_on && zeb) {
+            GLenum zfmt = 0;
+            // >= 512x512 (lowered from 1024 on her word 2026-08-31, "дожми 512"): the
+            // 513..1023 band held hundreds of MB in the size histogram. 128..512 stays
+            // uncompressed -- that is UI and close-up art, and the shrink floor territory.
+            if (level == 0 && (long)width * height >= 512L * 512) {
+                if (format == GL_RGB) {
+                    zfmt = 0x9274; // GL_COMPRESSED_RGB8_ETC2
+                } else {
+                    // one pass over alpha, like T16: fully opaque -> RGB8_ETC2 (8:1)
+                    const unsigned char* zp = (const unsigned char*)data;
+                    int zopq = 1;
+                    for (long zi = 3, zn = (long)width * height * 4; zi < zn && zopq; zi += 4)
+                        if (zp[zi] != 255) zopq = 0;
+                    zfmt = zopq ? 0x9274 : 0x9278; // : GL_COMPRESSED_RGBA8_ETC2_EAC
+                }
+            } else if (level > 0 && zeb->zetc2_format) {
+                zfmt = zeb->zetc2_format; // mip chain follows level 0, never mixes
+            }
+            if (zfmt) {
+                size_t zsz = 0;
+                static int zcache_on = -1;
+                if (zcache_on < 0) {
+                    const char* zc = getenv("LIBGL_ETC2CACHE");
+                    zcache_on = zc ? atoi(zc) : 1; // the cache IS the point: default on
+                }
+                const void* zblocks =
+                        zcache_on ? zomdroid_etc2_cached(zfmt, width, height, (const uint8_t*)data,
+                                                         (format == GL_RGB) ? 3 : 4, &zsz)
+                                  : zomdroid_etc2_encode(zfmt, width, height, (const uint8_t*)data,
+                                                         (format == GL_RGB) ? 3 : 4, &zsz);
+                if (zblocks) {
+                    gl4es_glCompressedTexImage2D(target, level, zfmt, width, height, border,
+                                                 (GLsizei)zsz, zblocks);
+                    if (level == 0) {
+                        zeb->zetc2_format = zfmt;
+                        zeb->alpha = (zfmt == 0x9278) ? 1 : 0;
+                        zeb->width = width;
+                        zeb->height = height;
+                        zeb->nwidth = width;
+                        zeb->nheight = height;
+                        zeb->adjustxy[0] = zeb->adjustxy[1] = 1.0f;
+                        zeb->shrink = 0;
+                    }
+                    {
+                        extern void zomdroid_gltrace(const char* fmt, ...);
+                        static int zlog = 0;
+                        if (zlog < 6) {
+                            zlog++;
+                            zomdroid_gltrace("ETC2 %dx%d L%d %s -> %zu bytes (encode total %llums)",
+                                             width, height, level,
+                                             (zfmt == 0x9278) ? "RGBA8_EAC" : "RGB8",
+                                             zsz, (unsigned long long)zomdroid_etc2_total_ms());
+                        }
+                    }
+                    return;
+                }
+                // encoder refused (size cap / OOM): fall through to the normal path
+            }
+        }
+    }
     // ZOMDROID T16 (texture lavina, RC28): PZ streams thousands of 1024x1024 RGBA8
     // world textures — measured 3.1GB live / 6900 objects at the lmkd kill. They are
     // NOT DXT (the decompression crumb never fired) and the game's own texture options
@@ -1928,6 +2008,25 @@ void APIENTRY_GL4ES gl4es_glTexSubImage2D(GLenum target, GLint level, GLint xoff
     }
 
     realize_bound(glstate->texture.active, target);
+
+    // ZOMDROID ETC2: a plain TexSubImage into compressed storage is GL_INVALID_OPERATION;
+    // with noerror forced it would corrupt silently instead. Refuse and say so -- field
+    // data (RC36 sub-upload counter) says PZ re-uploads these atlases whole, so this
+    // line firing at all is itself a finding.
+    {
+        gltexture_t* zeb = glstate->texture.bound[glstate->texture.active][what_target(target)];
+        if (zeb && zeb->zetc2_format) {
+            extern void zomdroid_gltrace(const char* fmt, ...);
+            static int zlog = 0;
+            if (zlog < 6) {
+                zlog++;
+                zomdroid_gltrace("ETC2SUB refused: %dx%d at %d,%d into compressed tex=%u", width,
+                                 height, xoffset, yoffset, zeb->texture);
+            }
+            noerrorShim();
+            return;
+        }
+    }
 
     if (width <= 0 || height <= 0) {
         return;

@@ -243,6 +243,15 @@ static void zomdroid_exit_probe(void) {
                          zdrawmix_total, zdrawmix_quads, zdrawmix_ebo, zdrawmix_direct, zdrawmix_inst, zebo_used,
                          zebo_try_de, zebo_try_dre);
     }
+    {
+        extern long zomdroid_etc2_n, zomdroid_etc2_hits, zomdroid_etc2_evicted;
+        extern unsigned long long zomdroid_etc2_total_ms(void);
+        extern unsigned long long zomdroid_etc2_io_ms(void);
+        if (zomdroid_etc2_n || zomdroid_etc2_hits)
+            zomdroid_gltrace("ETC2 session: encodes=%ld cache-hits=%ld evicted=%ld encode-ms=%llu io-ms=%llu",
+                             zomdroid_etc2_n, zomdroid_etc2_hits, zomdroid_etc2_evicted,
+                             zomdroid_etc2_total_ms(), zomdroid_etc2_io_ms());
+    }
     zomdroid_gltrace("CCACHE session: hits=%d miss=%d", zccache_hits, zccache_miss);
     zomdroid_gltrace("EXIT-PROBE: process exiting via exit(), not a signal kill");
 }
