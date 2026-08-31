@@ -75,7 +75,8 @@ void zomdroid_gltrace(const char* fmt, ...) {
         va_end(args);
         fputc('\n', f);
         if (!strncmp(fmt, "INIT", 4) || !strncmp(fmt, "MEMSTAT", 7) || !strncmp(fmt, "EXIT", 4) ||
-            !strncmp(fmt, "GLALLOC exit", 12) || !strncmp(fmt, "CCACHE", 6) || !strncmp(fmt, "FBO", 3))
+            !strncmp(fmt, "GLALLOC exit", 12) || !strncmp(fmt, "CCACHE", 6) || !strncmp(fmt, "FBO", 3) ||
+            !strncmp(fmt, "DRAWMIX", 7))
             fflush(f);
     }
     // ZOMDROID DIAG: mirror to stderr — it lands in the console log that testers can
@@ -234,6 +235,14 @@ static void zomdroid_exit_probe(void) {
     zga_report("exit");
     zomdroid_gltrace("FBO session: binds app=%ld native=%ld skipped=%ld clearbuf-native=%ld", zomdroid_fbo_bind_app,
                      zomdroid_fbo_bind_native, zomdroid_fbo_bind_skip, zomdroid_clearbuf_native);
+    {
+        extern long zdrawmix_total, zdrawmix_quads, zdrawmix_ebo, zdrawmix_direct, zdrawmix_inst;
+        extern long zebo_used, zebo_try_de, zebo_try_dre;
+        zomdroid_gltrace("DRAWMIX session: draws=%ld quads=%ld ebo=%ld direct-ok=%ld inst=%ld direct-taken=%ld"
+                         " via-DrawElements=%ld via-RangeElements=%ld",
+                         zdrawmix_total, zdrawmix_quads, zdrawmix_ebo, zdrawmix_direct, zdrawmix_inst, zebo_used,
+                         zebo_try_de, zebo_try_dre);
+    }
     zomdroid_gltrace("CCACHE session: hits=%d miss=%d", zccache_hits, zccache_miss);
     zomdroid_gltrace("EXIT-PROBE: process exiting via exit(), not a signal kill");
 }
