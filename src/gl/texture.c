@@ -837,6 +837,23 @@ static int get_shrinklevel(int width, int height, int level) {
     int shrink = 0;
     int mipwidth = width << level;
     int mipheight = height << level;
+    // ZOMDROID FLOOR (measured 2026-08-30): shrinking is effectively mandatory on this
+    // renderer, so its visible damage is a product problem rather than a preference --
+    // and the damage lands on SMALL textures. Mode 1 halves everything above one pixel,
+    // which is how it turned the rain droplets to mush. The session histogram says those
+    // textures are not where the memory is: everything with a longest side of 128 or
+    // less accounted for 10 MB of 4285 MB uploaded, a quarter of one percent. So never
+    // shrink them, in any mode. (256 would have cost 24% -- that one stays on the table
+    // only as an explicit quality option.) LIBGL_SHRINKFLOOR overrides the size.
+    {
+        static int zfloor = -1;
+        if (zfloor < 0) {
+            const char* ze = getenv("LIBGL_SHRINKFLOOR");
+            zfloor = ze ? atoi(ze) : 128;
+            if (zfloor < 0) zfloor = 0;
+        }
+        if (mipwidth <= zfloor && mipheight <= zfloor) return 0;
+    }
     switch (globals4es.texshrink) {
     case 0: // nothing
         break;
