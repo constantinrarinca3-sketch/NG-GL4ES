@@ -921,7 +921,7 @@ void initialize_gl4es() {
     // verify WHICH renderer actually loaded (Zomdroid resets the choice on new instances).
     {
         extern void zomdroid_gltrace(const char* fmt, ...);
-        zomdroid_gltrace("INIT ng_gl4es RC50-PLAY (ETC2 cache key hashed 8 lanes at memory speed), noerror=%d",
+        zomdroid_gltrace("INIT ng_gl4es RC51-ACTIVEUNIT (PopAttrib restores the active texture unit), noerror=%d",
                          globals4es.noerror);
         {
             extern void zomdroid_exit_probe_register(void);
