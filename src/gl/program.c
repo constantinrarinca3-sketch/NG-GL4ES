@@ -1099,7 +1099,22 @@ void APIENTRY_GL4ES gl4es_glLinkProgram(GLuint program) {
             extern void zomdroid_gltrace(const char* fmt, ...);
             zomdroid_gltrace("LINK prog=%u linked=%d ms=%ld", program, glprogram->linked, zlkms);
         }
+        if (!glprogram->linked) {
+            int cache_retries = 0;
+            for (int i = 0; i < glprogram->attach_size; i++)
+                cache_retries += zomdroid_ccache_retry_shader(glprogram->attach[i]);
+            if (cache_retries) {
+                zomdroid_gltrace("CCACHE link fallback prog=%u cached_shaders=%d action=cold-retry", program,
+                                 cache_retries);
+                // The retry helpers clear their cache-hit state before returning, so a
+                // second failure cannot recurse again.
+                gl4es_glLinkProgram(program);
+                return;
+            }
+        }
         if (glprogram->linked) {
+            for (int i = 0; i < glprogram->attach_size; i++)
+                zomdroid_ccache_accept_shader(glprogram->attach[i]);
             // ZOMDROID FIX (white-world root, part 2): set_uniforms_default_value ran
             // BEFORE fill_program, so every glGetUniformLocation returned -1 and all
             // GLSL uniform initializers (stripped by the converter) were silently lost.

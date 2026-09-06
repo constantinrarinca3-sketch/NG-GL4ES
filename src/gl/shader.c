@@ -267,49 +267,112 @@ static char* zomdroid_floatify_builtin_args(char* src) {
     return out;
 }
 
-// ZOMDROID PERF (conversion cache, floor 1 of the warm-cache plan, 2026-07-29):
-// RC19 timing on a fresh save showed OUR string passes are the top stutter source:
-// 302 shaders -> CONVERT 1803ms total, 26 big ones eating 1652ms (worst 306ms for a
-// single 22KB chunk shader), vs driver COMPILE 638ms / LINK 545ms. The passes are
-// deterministic, so cache their product on disk keyed by the ORIGINAL source:
-//   files/ngg_convcache/cc_<fnv64>_<len>.bin =
-//     [u32 olen][orig][u32 slen][mutated source][u32 clen][converted]
-//     [u16 n]{u16,name u16,type u16,value}*n      (uniform-defaults table)
-// The stored original is memcmp-verified on load — a false hit is impossible.
-// First-ever encounter pays full price and writes; every later encounter (same run or
-// months later) restores in ~0ms. LIBGL_NOCONVCACHE=1 disables. Stale entries are
-// harmless (key = content); the dir can always be deleted.
+// ZOMDROID PERF (persistent conversion cache v2): cache the expensive deterministic
+// string-conversion stage, but preserve every piece of state needed by the later
+// vertex/fragment compatibility pass.  Version 1 only restored the two source strings
+// and the uniform-default table.  It lost shaderconv_need_t, so glLinkProgram believed
+// a cached pair was already compatible and skipped redoShader(); each shader compiled
+// separately, then the pair failed to link on Adreno with an empty driver log.
+//
+// A second warm-only bug lived outside the serialized payload: the built-in vertex
+// attribute-name tables were initialized only as a side effect of conversion.  An
+// all-hit launch bypassed that side effect, so hasBuiltinAttrib() matched the empty
+// table entries and bound empty attribute names.  shaderconv.c now initializes those
+// tables at every public consumer boundary.
+//
+// V2 is deliberately incompatible with the old cc_*.bin files.  Its filename and
+// header include shader stage, conversion-pipeline revision and the relevant GLES
+// capability fingerprint.  The pristine source is still memcmp-verified, and a payload
+// checksum rejects truncated/corrupt entries.  A cache-assisted link failure gets one
+// cache-bypassed cold retry in program.c.
 #include <sys/stat.h>
 int zccache_hits = 0, zccache_miss = 0;
-static const char* ZCC_DIR = "/data/data/com.zomdroid/files/ngg_convcache";
+
+#define ZCC_MAGIC 0x3243435au /* "ZCC2" on Android's little-endian ARM64 */
+#define ZCC_FORMAT_VERSION 2u
+#define ZCC_PIPELINE_REVISION 1u
+
+static int zomdroid_nonconstinit_honored(const char* src);
+
+static const char* zcc_dir(void) {
+    // NGG_DIR_PATH is initialized before any GL shader call.  Keeping the cache under
+    // that caller-owned directory avoids package-name literals and binary patching.
+    return (NGGDirectory && NGGDirectory[0]) ? NGGDirectory : NULL;
+}
 static int zcc_enabled(void) {
-    // RELEASE SAFETY (2026-07-29): a fresh SIGSEGV (si_addr=0xd, save-load, exactly one
-    // cache hit in the run) implicates the hit path. Until that autopsy is done the
-    // cache is OPT-IN: set LIBGL_CONVCACHE=1 to enable. Perf work must never gamble a
-    // release.
+    // Remains opt-in until the v2 path has passed repeated cold/warm device tests.
     static int zst = -1;
     if (zst < 0) {
         const char* e = getenv("LIBGL_CONVCACHE");
-        zst = (e && e[0] == '1') ? 1 : 0;
-        if (zst) mkdir(ZCC_DIR, 0700);
+        zst = (e && e[0] == '1' && zcc_dir()) ? 1 : 0;
+        if (zst) mkdir(zcc_dir(), 0700);
     }
     return zst;
 }
-static unsigned long long zcc_fnv64(const char* s, size_t n) {
-    unsigned long long h = 1469598103934665603ULL;
+static uint64_t zcc_hash_bytes(uint64_t h, const void* data, size_t n) {
+    const unsigned char* s = (const unsigned char*)data;
     for (size_t i = 0; i < n; i++) {
-        h ^= (unsigned char)s[i];
+        h ^= s[i];
         h *= 1099511628211ULL;
     }
     return h;
 }
-static void zcc_path(char* out, size_t cap, const char* orig, size_t olen) {
-    snprintf(out, cap, "%s/cc_%016llx_%zu.bin", ZCC_DIR, zcc_fnv64(orig, olen), olen);
+static uint64_t zcc_hash_u32(uint64_t h, uint32_t v) {
+    unsigned char b[4] = {(unsigned char)v, (unsigned char)(v >> 8), (unsigned char)(v >> 16),
+                          (unsigned char)(v >> 24)};
+    return zcc_hash_bytes(h, b, sizeof(b));
+}
+static uint64_t zcc_fnv64(const char* s, size_t n) {
+    return zcc_hash_bytes(1469598103934665603ULL, s, n);
+}
+static uint64_t zcc_context_hash(const struct shader_s* glshader, const char* orig) {
+    uint64_t h = 1469598103934665603ULL;
+#define ZCC_CTX(V) h = zcc_hash_u32(h, (uint32_t)(V))
+    ZCC_CTX(ZCC_PIPELINE_REVISION);
+    ZCC_CTX(glshader->type);
+    ZCC_CTX(globals4es.es);
+    ZCC_CTX(globals4es.esversion);
+    ZCC_CTX(globals4es.simple_shaderconv);
+    ZCC_CTX(globals4es.notexarray);
+    ZCC_CTX(globals4es.nohighp);
+    ZCC_CTX(globals4es.shadernogles);
+    ZCC_CTX(globals4es.nointovlhack);
+    ZCC_CTX(globals4es.vgpu_precision);
+    ZCC_CTX(globals4es.vgpu_backport);
+    ZCC_CTX(hardext.maxvarying);
+    ZCC_CTX(hardext.highp);
+    ZCC_CTX(hardext.glsl120);
+    ZCC_CTX(hardext.glsl300es);
+    ZCC_CTX(hardext.glsl310es);
+    ZCC_CTX(hardext.glsl320es);
+    ZCC_CTX(hardext.nonconstinit);
+    ZCC_CTX(hardext.nonconstinit ? zomdroid_nonconstinit_honored(orig) : 0);
+#undef ZCC_CTX
+    return h;
+}
+static int zcc_path(char* out, size_t cap, const struct shader_s* glshader, const char* orig, size_t olen) {
+    const char* dir = zcc_dir();
+    if (!dir) return 0;
+    int n = snprintf(out, cap, "%s/zcc2_%08x_%016llx_%016llx_%zu.bin", dir, (unsigned)glshader->type,
+                     (unsigned long long)zcc_context_hash(glshader, orig),
+                     (unsigned long long)zcc_fnv64(orig, olen), olen);
+    return n > 0 && (size_t)n < cap;
+}
+static int zcc_sidecar_path(char* out, size_t cap, const char* path, const char* suffix) {
+    int n = snprintf(out, cap, "%s%s", path, suffix);
+    return n > 0 && (size_t)n < cap;
 }
 static int zcc_rd(FILE* f, void* p, size_t n) { return fread(p, 1, n, f) == n; }
+static int zcc_wr(FILE* f, const void* p, size_t n) { return fwrite(p, 1, n, f) == n; }
+static int zcc_rd_u16(FILE* f, uint16_t* v) { return zcc_rd(f, v, sizeof(*v)); }
+static int zcc_wr_u16(FILE* f, uint16_t v) { return zcc_wr(f, &v, sizeof(v)); }
+static int zcc_rd_u32(FILE* f, uint32_t* v) { return zcc_rd(f, v, sizeof(*v)); }
+static int zcc_wr_u32(FILE* f, uint32_t v) { return zcc_wr(f, &v, sizeof(v)); }
+static int zcc_rd_u64(FILE* f, uint64_t* v) { return zcc_rd(f, v, sizeof(*v)); }
+static int zcc_wr_u64(FILE* f, uint64_t v) { return zcc_wr(f, &v, sizeof(v)); }
 static char* zcc_rdblk(FILE* f, unsigned* plen) {
-    unsigned n;
-    if (!zcc_rd(f, &n, 4) || n > 16u * 1024 * 1024) return NULL;
+    uint32_t n;
+    if (!zcc_rd_u32(f, &n) || n > 16u * 1024 * 1024) return NULL;
     char* b = (char*)malloc((size_t)n + 1);
     if (!b) return NULL;
     if (n && !zcc_rd(f, b, n)) {
@@ -320,32 +383,112 @@ static char* zcc_rdblk(FILE* f, unsigned* plen) {
     if (plen) *plen = n;
     return b;
 }
+static int zcc_wrblk(FILE* f, const char* p, size_t n) {
+    return n <= UINT32_MAX && zcc_wr_u32(f, (uint32_t)n) && (!n || zcc_wr(f, p, n));
+}
+static int zcc_rd_need(FILE* f, shaderconv_need_t* need) {
+    uint32_t v[11];
+    for (unsigned i = 0; i < sizeof(v) / sizeof(v[0]); i++)
+        if (!zcc_rd_u32(f, &v[i])) return 0;
+    need->need_color = (int32_t)v[0];
+    need->need_secondary = (int32_t)v[1];
+    need->need_fogcoord = (int32_t)v[2];
+    need->need_texcoord = (int32_t)v[3];
+    need->need_notexarray = (int32_t)v[4];
+    need->need_normalmatrix = (int32_t)v[5];
+    need->need_mvmatrix = (int32_t)v[6];
+    need->need_mvpmatrix = (int32_t)v[7];
+    need->need_clean = (int32_t)v[8];
+    need->need_clipvertex = (int32_t)v[9];
+    need->need_texs = v[10];
+    return 1;
+}
+static int zcc_wr_need(FILE* f, const shaderconv_need_t* need) {
+    uint32_t v[11] = {(uint32_t)need->need_color,        (uint32_t)need->need_secondary,
+                      (uint32_t)need->need_fogcoord,     (uint32_t)need->need_texcoord,
+                      (uint32_t)need->need_notexarray,   (uint32_t)need->need_normalmatrix,
+                      (uint32_t)need->need_mvmatrix,     (uint32_t)need->need_mvpmatrix,
+                      (uint32_t)need->need_clean,        (uint32_t)need->need_clipvertex,
+                      (uint32_t)need->need_texs};
+    for (unsigned i = 0; i < sizeof(v) / sizeof(v[0]); i++)
+        if (!zcc_wr_u32(f, v[i])) return 0;
+    return 1;
+}
+static uint64_t zcc_payload_hash(const char* smut, const char* sconv, const shaderconv_need_t* need,
+                                 const uniform_declaration_s* uniforms, uint16_t n) {
+    uint64_t h = 1469598103934665603ULL;
+    uint32_t slen = (uint32_t)strlen(smut), clen = (uint32_t)strlen(sconv);
+    h = zcc_hash_u32(h, slen);
+    h = zcc_hash_bytes(h, smut, slen);
+    h = zcc_hash_u32(h, clen);
+    h = zcc_hash_bytes(h, sconv, clen);
+#define ZCC_NEED_HASH(V) h = zcc_hash_u32(h, (uint32_t)(V))
+    ZCC_NEED_HASH(need->need_color);
+    ZCC_NEED_HASH(need->need_secondary);
+    ZCC_NEED_HASH(need->need_fogcoord);
+    ZCC_NEED_HASH(need->need_texcoord);
+    ZCC_NEED_HASH(need->need_notexarray);
+    ZCC_NEED_HASH(need->need_normalmatrix);
+    ZCC_NEED_HASH(need->need_mvmatrix);
+    ZCC_NEED_HASH(need->need_mvpmatrix);
+    ZCC_NEED_HASH(need->need_clean);
+    ZCC_NEED_HASH(need->need_clipvertex);
+    ZCC_NEED_HASH(need->need_texs);
+#undef ZCC_NEED_HASH
+    h = zcc_hash_u32(h, n);
+    for (uint16_t i = 0; i < n; i++) {
+        const char* s3[3] = {uniforms[i].variable, uniforms[i].type, uniforms[i].initial_value};
+        for (int k = 0; k < 3; k++) {
+            uint32_t len = (uint32_t)strlen(s3[k]);
+            h = zcc_hash_u32(h, len);
+            h = zcc_hash_bytes(h, s3[k], len);
+        }
+    }
+    return h;
+}
 // Returns 1 on verified hit (fields of glshader replaced), 0 otherwise.
 static int zomdroid_ccache_try(struct shader_s* glshader, const char* orig, size_t olen) {
     if (!zcc_enabled()) return 0;
     char path[512];
-    zcc_path(path, sizeof(path), orig, olen);
+    if (!zcc_path(path, sizeof(path), glshader, orig, olen)) return 0;
+    char rejected[528];
+    struct stat rejected_stat;
+    if (zcc_sidecar_path(rejected, sizeof(rejected), path, ".rejected") && stat(rejected, &rejected_stat) == 0)
+        return 0;
     FILE* f = fopen(path, "rb");
     if (!f) return 0;
     int ok = 0;
     char *sorig = NULL, *smut = NULL, *sconv = NULL;
+    uniform_declaration_s* uniforms = NULL;
+    char* backup = NULL;
+    shaderconv_need_t need = {0};
     unsigned lo = 0;
     do {
+        uint32_t magic, version, revision, type;
+        uint64_t context;
+        if (!zcc_rd_u32(f, &magic) || !zcc_rd_u32(f, &version) || !zcc_rd_u32(f, &revision) ||
+            !zcc_rd_u32(f, &type) || !zcc_rd_u64(f, &context))
+            break;
+        if (magic != ZCC_MAGIC || version != ZCC_FORMAT_VERSION || revision != ZCC_PIPELINE_REVISION ||
+            type != (uint32_t)glshader->type || context != zcc_context_hash(glshader, orig))
+            break;
         sorig = zcc_rdblk(f, &lo);
         if (!sorig || lo != olen || memcmp(sorig, orig, olen) != 0) break;
         smut = zcc_rdblk(f, NULL);
         sconv = zcc_rdblk(f, NULL);
         if (!smut || !sconv) break;
-        unsigned short n;
-        if (!zcc_rd(f, &n, 2) || n > MAX_UNIFORM_VARIABLE_NUMBER) break;
+        if (!zcc_rd_need(f, &need)) break;
+        uint16_t n;
+        if (!zcc_rd_u16(f, &n) || n > MAX_UNIFORM_VARIABLE_NUMBER) break;
+        uniforms = (uniform_declaration_s*)calloc(n ? n : 1, sizeof(*uniforms));
+        if (!uniforms) break;
         int bad = 0;
         for (int i = 0; i < n && !bad; i++) {
-            unsigned short l[3];
-            char* dst[3] = { glshader->uniforms_declarations[i].variable, glshader->uniforms_declarations[i].type,
-                             glshader->uniforms_declarations[i].initial_value };
+            uint16_t l[3];
+            char* dst[3] = {uniforms[i].variable, uniforms[i].type, uniforms[i].initial_value};
             unsigned cap3[3] = { MAX_VARIABLE_LENGTH, MAX_UNIFORM_TYPE_LENGTH, MAX_INITIAL_VALUE_LENGTH };
             for (int k = 0; k < 3; k++) {
-                if (!zcc_rd(f, &l[k], 2) || l[k] >= cap3[k] || (l[k] && !zcc_rd(f, dst[k], l[k]))) {
+                if (!zcc_rd_u16(f, &l[k]) || l[k] >= cap3[k] || (l[k] && !zcc_rd(f, dst[k], l[k]))) {
                     bad = 1;
                     break;
                 }
@@ -353,55 +496,77 @@ static int zomdroid_ccache_try(struct shader_s* glshader, const char* orig, size
             }
         }
         if (bad) break;
+        uint64_t checksum;
+        if (!zcc_rd_u64(f, &checksum) || checksum != zcc_payload_hash(smut, sconv, &need, uniforms, n) ||
+            fgetc(f) != EOF)
+            break;
+        backup = (char*)malloc(olen + 1);
+        if (!backup) break;
+        memcpy(backup, orig, olen);
+        backup[olen] = '\0';
+        if (n) memcpy(glshader->uniforms_declarations, uniforms, n * sizeof(*uniforms));
         glshader->uniforms_declarations_count = n;
+        glshader->need = need;
         free(glshader->source);
         glshader->source = smut;
         smut = NULL;
         free(glshader->converted);
         glshader->converted = sconv;
         sconv = NULL;
+        glshader->zccache_original = backup;
+        backup = NULL;
+        glshader->zccache_hit = 1;
         ok = 1;
     } while (0);
     free(sorig);
     free(smut);
+    free(uniforms);
+    free(backup);
     if (!ok) free(sconv);
     fclose(f);
-    if (ok) zccache_hits++;
+    if (ok)
+        zccache_hits++;
+    else
+        remove(path);
     return ok;
 }
 static void zomdroid_ccache_store(struct shader_s* glshader, const char* orig, size_t olen) {
     if (!zcc_enabled() || !glshader->converted || !glshader->source) return;
     zccache_miss++;
-    char path[512], tmp[520];
-    zcc_path(path, sizeof(path), orig, olen);
+    char path[512], tmp[528], rejected[528];
+    if (!zcc_path(path, sizeof(path), glshader, orig, olen)) return;
+    struct stat rejected_stat;
+    if (zcc_sidecar_path(rejected, sizeof(rejected), path, ".rejected") && stat(rejected, &rejected_stat) == 0)
+        return;
     snprintf(tmp, sizeof(tmp), "%s.tmp", path);
     FILE* f = fopen(tmp, "wb");
     if (!f) return;
-    unsigned v;
-    int ok = 1;
-#define ZCC_WB(P, N)                                                                                                   \
-    do {                                                                                                               \
-        v = (unsigned)(N);                                                                                             \
-        ok = ok && fwrite(&v, 1, 4, f) == 4 && (v == 0 || fwrite((P), 1, v, f) == v);                                  \
-    } while (0)
-    ZCC_WB(orig, olen);
-    ZCC_WB(glshader->source, strlen(glshader->source));
-    ZCC_WB(glshader->converted, strlen(glshader->converted));
-#undef ZCC_WB
-    unsigned short n = (unsigned short)glshader->uniforms_declarations_count;
+    int ok = zcc_wr_u32(f, ZCC_MAGIC) && zcc_wr_u32(f, ZCC_FORMAT_VERSION) &&
+             zcc_wr_u32(f, ZCC_PIPELINE_REVISION) && zcc_wr_u32(f, (uint32_t)glshader->type) &&
+             zcc_wr_u64(f, zcc_context_hash(glshader, orig)) && zcc_wrblk(f, orig, olen) &&
+             zcc_wrblk(f, glshader->source, strlen(glshader->source)) &&
+             zcc_wrblk(f, glshader->converted, strlen(glshader->converted)) && zcc_wr_need(f, &glshader->need);
+    uint16_t n = (uint16_t)glshader->uniforms_declarations_count;
     if (n > MAX_UNIFORM_VARIABLE_NUMBER) n = MAX_UNIFORM_VARIABLE_NUMBER;
-    ok = ok && fwrite(&n, 1, 2, f) == 2;
+    ok = ok && zcc_wr_u16(f, n);
     for (int i = 0; i < n && ok; i++) {
         const char* s3[3] = { glshader->uniforms_declarations[i].variable, glshader->uniforms_declarations[i].type,
                               glshader->uniforms_declarations[i].initial_value };
         for (int k = 0; k < 3 && ok; k++) {
-            unsigned short l = (unsigned short)strlen(s3[k]);
-            ok = fwrite(&l, 1, 2, f) == 2 && (l == 0 || fwrite(s3[k], 1, l, f) == l);
+            size_t len = strlen(s3[k]);
+            if (len > UINT16_MAX) {
+                ok = 0;
+                break;
+            }
+            uint16_t l = (uint16_t)len;
+            ok = zcc_wr_u16(f, l) && (!l || zcc_wr(f, s3[k], l));
         }
     }
+    if (ok)
+        ok = zcc_wr_u64(f, zcc_payload_hash(glshader->source, glshader->converted, &glshader->need,
+                                            glshader->uniforms_declarations, n));
     fclose(f);
-    if (ok) rename(tmp, path);
-    else remove(tmp);
+    if (!ok || rename(tmp, path) != 0) remove(tmp);
 }
 
 // ZOMDROID FIX (Mali strictness, wave 4 — field report 2026-07-26): ivec-TYPED
@@ -1632,6 +1797,7 @@ void actually_deleteshader(GLuint shader) {
             if (glshader->converted) free(glshader->converted);
             // ZOMDROID FIX: an owned copy since the BindFragData overflow fix
             if (glshader->before_patch) free(glshader->before_patch);
+            if (glshader->zccache_original) free(glshader->zccache_original);
             free(glshader);
         }
     }
@@ -2373,6 +2539,16 @@ void APIENTRY_GL4ES gl4es_glShaderSource(GLuint shader, GLsizei count, const GLc
     }
 
     CHECK_SHADER(void, shader)
+    // A shader object may receive a new source more than once.  Conversion needs are
+    // properties of that source, not of the object, so retaining them can both poison
+    // a cold conversion and make a cache hit look compatible by accident.
+    memset(&glshader->need, 0, sizeof(glshader->need));
+    glshader->need.need_texcoord = -1;
+    glshader->zccache_hit = 0;
+    if (glshader->zccache_original) {
+        free(glshader->zccache_original);
+        glshader->zccache_original = NULL;
+    }
     // ZOMDROID FIX: new source = new uniform table. The count was never reset, so every
     // recompile of the same shader object appended duplicate entries; past 1024 entries
     // process_uniform_declarations wrote beyond the array (silent heap smash).
@@ -2431,7 +2607,9 @@ void APIENTRY_GL4ES gl4es_glShaderSource(GLuint shader, GLsizei count, const GLc
             size_t zcc_olen = strlen(glshader->source);
             char* zcc_orig = (char*)malloc(zcc_olen + 1);
             if (zcc_orig) memcpy(zcc_orig, glshader->source, zcc_olen + 1);
-            int zcc_hit = zcc_orig ? zomdroid_ccache_try(glshader, zcc_orig, zcc_olen) : 0;
+            int zcc_hit = (zcc_orig && !glshader->zccache_bypass)
+                                  ? zomdroid_ccache_try(glshader, zcc_orig, zcc_olen)
+                                  : 0;
             if (zcc_hit) {
                 glshader->is_converted_essl_320 = 0;
                 extern void zomdroid_gltrace(const char* fmt, ...);
@@ -2489,7 +2667,7 @@ void APIENTRY_GL4ES gl4es_glShaderSource(GLuint shader, GLsizei count, const GLc
                 zomdroid_gltrace("CONVERT end shader=%u clen=%d ms=%ld", shader,
                                  glshader->converted ? (int)strlen(glshader->converted) : -1, zcms);
             }
-            if (zcc_orig) zomdroid_ccache_store(glshader, zcc_orig, zcc_olen);
+            if (zcc_orig && !glshader->zccache_bypass) zomdroid_ccache_store(glshader, zcc_orig, zcc_olen);
             } // !zcc_hit
             free(zcc_orig);
 
@@ -2725,6 +2903,41 @@ void redoShader(GLuint shader, shaderconv_need_t* need) {
             shader, 1, (const GLchar* const*)((glshader->converted) ? (&glshader->converted) : (&glshader->source)), NULL);
     // recompile...
     gl4es_glCompileShader(glshader->id);
+}
+
+int zomdroid_ccache_retry_shader(GLuint shader) {
+    CHECK_SHADER(int, shader)
+    if (!glshader->zccache_hit || !glshader->zccache_original) return 0;
+
+    size_t olen = strlen(glshader->zccache_original);
+    char* original = (char*)malloc(olen + 1);
+    if (!original) return 0;
+    memcpy(original, glshader->zccache_original, olen + 1);
+
+    // Quarantine the rejected entry and do not immediately write the same pre-link
+    // form back during the safety retry. The sidecar keeps this exact stage/context/
+    // source tuple on the safe cold path until the cache is explicitly cleared.
+    char path[512], rejected[528];
+    if (zcc_path(path, sizeof(path), glshader, original, olen)) {
+        if (!zcc_sidecar_path(rejected, sizeof(rejected), path, ".rejected") || rename(path, rejected) != 0)
+            remove(path);
+    }
+    glshader->zccache_bypass = 1;
+    const GLchar* source = original;
+    gl4es_glShaderSource(shader, 1, &source, NULL);
+    glshader->zccache_bypass = 0;
+    gl4es_glCompileShader(shader);
+    free(original);
+    return 1;
+}
+
+void zomdroid_ccache_accept_shader(GLuint shader) {
+    CHECK_SHADER(void, shader)
+    glshader->zccache_hit = 0;
+    if (glshader->zccache_original) {
+        free(glshader->zccache_original);
+        glshader->zccache_original = NULL;
+    }
 }
 
 void APIENTRY_GL4ES gl4es_glGetShaderSource(GLuint shader, GLsizei bufSize, GLsizei* length, GLchar* source) {

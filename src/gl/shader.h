@@ -58,6 +58,12 @@ struct shader_s {
     int uniforms_declarations_count;
     int is_converted_essl_320;
     char* before_patch;
+    // Zomdroid persistent conversion-cache bookkeeping.  A cache hit must retain
+    // the pristine source until the first successful link so program.c can fall
+    // back to a full conversion if the cached vertex/fragment pair is rejected.
+    int zccache_hit;
+    int zccache_bypass;
+    char* zccache_original;
 }; // shader_t defined in oldprogram.h
 
 KHASH_MAP_DECLARE_INT(shaderlist, struct shader_s*);
@@ -80,6 +86,8 @@ void APIENTRY_GL4ES gl4es_glReleaseShaderCompiler(void);
 void accumShaderNeeds(GLuint shader, shaderconv_need_t* need);
 int isShaderCompatible(GLuint shader, shaderconv_need_t* need);
 void redoShader(GLuint shader, shaderconv_need_t* need);
+int zomdroid_ccache_retry_shader(GLuint shader);
+void zomdroid_ccache_accept_shader(GLuint shader);
 struct shader_s* getShader(GLuint shader);
 
 #define CHECK_SHADER(type, shader)                                                                                     \

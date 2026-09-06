@@ -398,8 +398,23 @@ static const char* gl4es_VertexAttrib = "_gl4es_VertexAttrib_";
 char gl_VA[MAX_VATTRIB][32] = {0};
 char gl4es_VA[MAX_VATTRIB][32] = {0};
 
+// Persistent shader-cache hits bypass ConvertShader/ConvertShaderSimple.  Those
+// functions used to be the only places initializing these tables, while the link
+// path always calls hasBuiltinAttrib().  On an all-hit warm launch gl4es_VA entries
+// therefore remained empty; strstr(vertexShader, "") matched every attribute and
+// glBindAttribLocation received empty names, making otherwise valid shader pairs
+// fail to link with no driver message.
+static void ensure_vertex_attrib_names(void) {
+    if (gl_VA[0][0] != '\0') return;
+    for (int i = 0; i < MAX_VATTRIB; ++i) {
+        sprintf(gl_VA[i], "%s%d", gl_VertexAttrib, i);
+        sprintf(gl4es_VA[i], "%s%d", gl4es_VertexAttrib, i);
+    }
+}
+
 char* ConvertShaderBuiltInVariableOnly(const char* pEntry, int isVertex, shaderconv_need_t* need,
                                        int doInsertDefinitions) {
+    ensure_vertex_attrib_names();
     int tmpsize = strlen(pEntry) * 2 + 500;
     char* Tmp = (char*)calloc(1, tmpsize);
     strcpy(Tmp, pEntry);
@@ -984,12 +999,7 @@ char* ConvertShaderBuiltInVariableOnly(const char* pEntry, int isVertex, shaderc
 }
 
 char* ConvertShader(const char* pEntry, int isVertex, shaderconv_need_t* need, int forwardPort) {
-    if (gl_VA[0][0] == '\0') {
-        for (int i = 0; i < MAX_VATTRIB; ++i) {
-            sprintf(gl_VA[i], "%s%d", gl_VertexAttrib, i);
-            sprintf(gl4es_VA[i], "%s%d", gl4es_VertexAttrib, i);
-        }
-    }
+    ensure_vertex_attrib_names();
     int fpeShader = (strstr(pEntry, fpeshader_signature) != NULL) ? 1 : 0;
     int maskbefore = 4 | (isVertex ? 1 : 2);
     int maskafter = 8 | (isVertex ? 1 : 2);
@@ -1829,6 +1839,7 @@ int isBuiltinMatrix(const char* name) {
 const char* hasBuiltinAttrib(const char* vertexShader, int Att) {
     if (!vertexShader) // can happens (like if the shader is a pure GLES2 one)
         return NULL;
+    ensure_vertex_attrib_names();
     // first search for the string
     const char* ret = NULL;
     if (hardext.maxvattrib > 8) {
@@ -1852,6 +1863,7 @@ const char* hasBuiltinAttrib(const char* vertexShader, int Att) {
 }
 
 const char* builtinAttribGLName(const char* name) {
+    ensure_vertex_attrib_names();
     // no need to check for compressed array here...
     int n = sizeof(builtin_attrib) / sizeof(builtin_attrib_t);
     for (int i = 0; i < n; ++i)
@@ -1867,6 +1879,7 @@ const char* builtinAttribGLName(const char* name) {
 }
 
 const char* builtinAttribInternalName(const char* name) {
+    ensure_vertex_attrib_names();
     // no need to check for compressed array here...
     int n = sizeof(builtin_attrib) / sizeof(builtin_attrib_t);
     for (int i = 0; i < n; ++i)
@@ -1883,12 +1896,7 @@ const char* builtinAttribInternalName(const char* name) {
 
 char* ConvertShaderSimple(const char* pEntry, int isVertex, shaderconv_need_t *need, int forwardPort)
 {
-    if(gl_VA[0][0]=='\0') {
-        for (int i=0; i<MAX_VATTRIB; ++i) {
-            sprintf(gl_VA[i], "%s%d", gl_VertexAttrib, i);
-            sprintf(gl4es_VA[i], "%s%d", gl4es_VertexAttrib, i);
-        }
-    }
+    ensure_vertex_attrib_names();
     int fpeShader = (strstr(pEntry, fpeshader_signature)!=NULL)?1:0;
     int maskbefore = 4|(isVertex?1:2);
     int maskafter = 8|(isVertex?1:2);
