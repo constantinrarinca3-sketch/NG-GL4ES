@@ -1187,6 +1187,11 @@ void APIENTRY_GL4ES gl4es_glUseProgram(GLuint program) {
     DBG(SHUT_LOGD("glUseProgram(%d) old=%d\n", program, glstate->glsl->program))
     PUSH_IF_COMPILING(glUseProgram);
     if (program == 0) {
+        // The native EBO batch defers the driver draw.  Do not let a draw queued
+        // for the current GLSL program run after the application has selected the
+        // fixed-pipeline program.  PZ changes programs at world/FBO/UI boundaries,
+        // including the zoom/composition pass.
+        if (glstate->glsl->program != 0) ZOMDROID_DRAW_STATE_BARRIER();
         glstate->glsl->program = 0;
         glstate->glsl->glprogram = NULL;
         return;
@@ -1195,6 +1200,12 @@ void APIENTRY_GL4ES gl4es_glUseProgram(GLuint program) {
     noerrorShim();
     DBG(SHUT_LOGD("program id=%d\n", glprogram->id))
 
+    // `glUseProgram` used to update only GL4ES' deferred state.  A pending EBO
+    // draw was therefore realized later with the *new* program, producing the
+    // characteristic split where the UI stayed correct while the world zoomed
+    // outside its FBO.  Repeated selection of the same program is not a boundary,
+    // preserving the useful batching window.
+    if (glstate->glsl->program != glprogram->id) ZOMDROID_DRAW_STATE_BARRIER();
     glstate->glsl->program = glprogram->id;
     glstate->glsl->glprogram = glprogram;
 }
