@@ -34,6 +34,7 @@ long zomdroid_glalloc_live_tex(void);
 typedef enum {
     ZNG_TRACE_DRAW_TOTAL = 0,
     ZNG_TRACE_DRAW_DRIVER,
+    ZNG_TRACE_DRAW_REALIZE,
     ZNG_TRACE_BUFFER,
     ZNG_TRACE_TEXTURE,
     ZNG_TRACE_PROGRAM,
@@ -56,6 +57,10 @@ int zomdroid_ngtrace_init(void);
 zomdroid_ngtrace_scope_t zomdroid_ngtrace_begin_enabled(
         zomdroid_ngtrace_category_t category, uint64_t units, uint64_t bytes);
 void zomdroid_ngtrace_end_enabled(zomdroid_ngtrace_scope_t* scope);
+void zomdroid_ngtrace_state_barrier_enabled(void);
+void zomdroid_ngtrace_draw_sample_enabled(
+        uint32_t mode, uint32_t type, uint64_t units, uint64_t program,
+        uintptr_t vao, uint32_t element_buffer, uint32_t framebuffer);
 
 static inline int zomdroid_ngtrace_active(void) {
     int state = __atomic_load_n(&zomdroid_ngtrace_state, __ATOMIC_RELAXED);
@@ -75,6 +80,14 @@ static inline void zomdroid_ngtrace_scope_cleanup(zomdroid_ngtrace_scope_t* scop
         zomdroid_ngtrace_end_enabled(scope);
 }
 
+// Conservative batch-candidate tracking. Any command that can alter draw state or
+// ordering advances the per-thread epoch. A pair is counted only when no barrier
+// occurred between the two driver draws and their essential bindings still match.
+static inline void zomdroid_ngtrace_state_barrier(void) {
+    if (__builtin_expect(zomdroid_ngtrace_active(), 0))
+        zomdroid_ngtrace_state_barrier_enabled();
+}
+
 #define ZNG_TRACE_JOIN2(A, B) A##B
 #define ZNG_TRACE_JOIN(A, B) ZNG_TRACE_JOIN2(A, B)
 #define ZOMDROID_NGTRACE_FUNCTION(CATEGORY, UNITS, BYTES)                                      \
@@ -87,6 +100,19 @@ static inline void zomdroid_ngtrace_scope_cleanup(zomdroid_ngtrace_scope_t* scop
             zomdroid_ngtrace_begin((CATEGORY), (uint64_t)(UNITS), (uint64_t)(BYTES));          \
         CALL;                                                                                  \
         zomdroid_ngtrace_scope_cleanup(&zng_call_scope);                                       \
+    } while (0)
+#define ZOMDROID_NGTRACE_STATE_BARRIER() zomdroid_ngtrace_state_barrier()
+#define ZOMDROID_NGTRACE_DRAW_CALL(MODE, TYPE, UNITS, PROGRAM, VAO, EBO, FBO, CALL)             \
+    do {                                                                                       \
+        zomdroid_ngtrace_scope_t zng_draw_scope =                                              \
+            zomdroid_ngtrace_begin(ZNG_TRACE_DRAW_DRIVER, (uint64_t)(UNITS), 0);               \
+        int zng_draw_trace_enabled = zng_draw_scope.active;                                    \
+        CALL;                                                                                  \
+        zomdroid_ngtrace_scope_cleanup(&zng_draw_scope);                                       \
+        if (__builtin_expect(zng_draw_trace_enabled, 0))                                       \
+            zomdroid_ngtrace_draw_sample_enabled(                                              \
+                (uint32_t)(MODE), (uint32_t)(TYPE), (uint64_t)(UNITS), (uint64_t)(PROGRAM),    \
+                (uintptr_t)(VAO), (uint32_t)(EBO), (uint32_t)(FBO));                            \
     } while (0)
 // One-shot usage probe for ES3-only entry points: logs the FIRST 3 calls per function
 // (then goes silent — zero flood). The last "GL3 use#" crumb before a silent death

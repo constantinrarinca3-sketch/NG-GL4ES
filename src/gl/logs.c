@@ -119,10 +119,29 @@ typedef struct {
     uint64_t calls[ZNG_TRACE_CATEGORY_COUNT];
     uint64_t units[ZNG_TRACE_CATEGORY_COUNT];
     uint64_t bytes[ZNG_TRACE_CATEGORY_COUNT];
+    uint64_t draw_bins[4];
+    uint64_t batch_followers;
+    uint64_t batch_runs;
+    uint64_t batch_draws;
+    uint64_t batch_max_run;
+    uint64_t batch_state_breaks;
+    uint64_t batch_signature_breaks;
 } zng_trace_bucket_t;
 
 static __thread zng_trace_bucket_t zng_bucket;
 static __thread unsigned short zng_depth[ZNG_TRACE_CATEGORY_COUNT];
+static __thread uint64_t zng_state_epoch = 1;
+static __thread struct {
+    uint64_t epoch;
+    uint64_t program;
+    uintptr_t vao;
+    uint32_t mode;
+    uint32_t type;
+    uint32_t element_buffer;
+    uint32_t framebuffer;
+    uint64_t run_length;
+    unsigned char valid;
+} zng_previous_draw;
 
 static uint64_t zng_now_ns(void) {
     struct timespec ts;
@@ -154,18 +173,20 @@ static void zng_emit_bucket(void) {
     // the output: draw-total minus gles-draw is the conversion/setup share we need to distinguish.
     uint64_t covered_ns = 0;
     for (int i = 0; i < ZNG_TRACE_CATEGORY_COUNT; ++i)
-        if (i != ZNG_TRACE_DRAW_DRIVER) covered_ns += zng_bucket.total_ns[i];
+        if (i != ZNG_TRACE_DRAW_DRIVER && i != ZNG_TRACE_DRAW_REALIZE)
+            covered_ns += zng_bucket.total_ns[i];
     if (covered_ns < zng_trace_threshold_ns) return;
 
     uint64_t upload_bytes = zng_bucket.bytes[ZNG_TRACE_BUFFER]
             + zng_bucket.bytes[ZNG_TRACE_TEXTURE];
-    char line[768];
+    char line[1024];
     int length = snprintf(line, sizeof(line),
             "[NGTRACE] bucket_ms=%llu tid=%ld covered_us=%llu "
-            "draw=%llu/%llu/%llu glesdraw=%llu/%llu/%llu "
+            "draw=%llu/%llu/%llu glesdraw=%llu/%llu/%llu realize=%llu/%llu/%llu "
             "buffer=%llu/%llu/%llu texture=%llu/%llu/%llu "
             "program=%llu/%llu/%llu fbo=%llu/%llu/%llu sync=%llu/%llu/%llu "
-            "draw_units=%llu upload_bytes=%llu\n",
+            "draw_units=%llu upload_bytes=%llu draw_bins=%llu/%llu/%llu/%llu "
+            "batch=%llu/%llu/%llu/%llu batch_breaks=%llu/%llu\n",
             (unsigned long long)((zng_bucket.bucket_id * ZNG_BUCKET_NS) / 1000000ull),
             zng_thread_id(), (unsigned long long)(covered_ns / 1000ull),
             (unsigned long long)(zng_bucket.total_ns[ZNG_TRACE_DRAW_TOTAL] / 1000ull),
@@ -174,6 +195,9 @@ static void zng_emit_bucket(void) {
             (unsigned long long)(zng_bucket.total_ns[ZNG_TRACE_DRAW_DRIVER] / 1000ull),
             (unsigned long long)zng_bucket.calls[ZNG_TRACE_DRAW_DRIVER],
             (unsigned long long)(zng_bucket.max_ns[ZNG_TRACE_DRAW_DRIVER] / 1000ull),
+            (unsigned long long)(zng_bucket.total_ns[ZNG_TRACE_DRAW_REALIZE] / 1000ull),
+            (unsigned long long)zng_bucket.calls[ZNG_TRACE_DRAW_REALIZE],
+            (unsigned long long)(zng_bucket.max_ns[ZNG_TRACE_DRAW_REALIZE] / 1000ull),
             (unsigned long long)(zng_bucket.total_ns[ZNG_TRACE_BUFFER] / 1000ull),
             (unsigned long long)zng_bucket.calls[ZNG_TRACE_BUFFER],
             (unsigned long long)(zng_bucket.max_ns[ZNG_TRACE_BUFFER] / 1000ull),
@@ -190,7 +214,17 @@ static void zng_emit_bucket(void) {
             (unsigned long long)zng_bucket.calls[ZNG_TRACE_SYNC],
             (unsigned long long)(zng_bucket.max_ns[ZNG_TRACE_SYNC] / 1000ull),
             (unsigned long long)zng_bucket.units[ZNG_TRACE_DRAW_TOTAL],
-            (unsigned long long)upload_bytes);
+            (unsigned long long)upload_bytes,
+            (unsigned long long)zng_bucket.draw_bins[0],
+            (unsigned long long)zng_bucket.draw_bins[1],
+            (unsigned long long)zng_bucket.draw_bins[2],
+            (unsigned long long)zng_bucket.draw_bins[3],
+            (unsigned long long)zng_bucket.batch_followers,
+            (unsigned long long)zng_bucket.batch_runs,
+            (unsigned long long)zng_bucket.batch_draws,
+            (unsigned long long)zng_bucket.batch_max_run,
+            (unsigned long long)zng_bucket.batch_state_breaks,
+            (unsigned long long)zng_bucket.batch_signature_breaks);
     if (length > 0) {
         size_t safe_length = (size_t)length < sizeof(line) ? (size_t)length : sizeof(line) - 1;
         zng_write_line(line, safe_length);
@@ -222,7 +256,9 @@ int zomdroid_ngtrace_init(void) {
     if (enabled) {
         char line[192];
         int length = snprintf(line, sizeof(line),
-                "[NGTRACE] enabled bucket_us=%llu slow_bucket_us=%llu output=native.log\n",
+                "[NGTRACE] enabled schema=2 bucket_us=%llu slow_bucket_us=%llu "
+                "draw_bins=1-6/7-24/25-96/97+ "
+                "batch=followers/runs/draws/max output=native.log\n",
                 (unsigned long long)(ZNG_BUCKET_NS / 1000ull),
                 (unsigned long long)(zng_trace_threshold_ns / 1000ull));
         if (length > 0) zng_write_line(line, (size_t)length);
@@ -238,9 +274,71 @@ zomdroid_ngtrace_scope_t zomdroid_ngtrace_begin_enabled(
     scope.active = 1;
     scope.units = units;
     scope.bytes = bytes;
+    // Uploads, program/FBO operations and explicit waits are ordering barriers.
+    // DRAW_DRIVER and DRAW_REALIZE are nested measurements of the same draw.
+    if (category != ZNG_TRACE_DRAW_TOTAL && category != ZNG_TRACE_DRAW_DRIVER &&
+            category != ZNG_TRACE_DRAW_REALIZE)
+        zomdroid_ngtrace_state_barrier_enabled();
     scope.record = (++zng_depth[category] == 1);
     if (scope.record) scope.start_ns = zng_now_ns();
     return scope;
+}
+
+void zomdroid_ngtrace_state_barrier_enabled(void) {
+    if (++zng_state_epoch == 0) {
+        zng_state_epoch = 1;
+        zng_previous_draw.valid = 0;
+    }
+}
+
+void zomdroid_ngtrace_draw_sample_enabled(
+        uint32_t mode, uint32_t type, uint64_t units, uint64_t program,
+        uintptr_t vao, uint32_t element_buffer, uint32_t framebuffer) {
+    // The driver timing scope has just ended, so zng_bucket already refers to the
+    // bucket containing this draw. Keep this function clock-free and allocation-free.
+    unsigned bin = units <= 6 ? 0 : (units <= 24 ? 1 : (units <= 96 ? 2 : 3));
+    zng_bucket.draw_bins[bin]++;
+
+    // Some internal render-list paths call the FPE driver helper directly. Their
+    // state changes bypass the public wrappers, so do not claim batch safety for
+    // them. The histogram and timing remain useful; only candidacy is suppressed.
+    if (!zng_depth[ZNG_TRACE_DRAW_TOTAL]) {
+        zng_previous_draw.valid = 0;
+        return;
+    }
+
+    int same_epoch = zng_previous_draw.valid && zng_previous_draw.epoch == zng_state_epoch;
+    int same_signature = zng_previous_draw.valid &&
+            zng_previous_draw.mode == mode && zng_previous_draw.type == type &&
+            zng_previous_draw.program == program && zng_previous_draw.vao == vao &&
+            zng_previous_draw.element_buffer == element_buffer &&
+            zng_previous_draw.framebuffer == framebuffer;
+    if (zng_previous_draw.valid && same_epoch && same_signature) {
+        zng_bucket.batch_followers++;
+        if (zng_previous_draw.run_length == 1) {
+            zng_bucket.batch_runs++;
+            zng_bucket.batch_draws += 2;
+        } else {
+            zng_bucket.batch_draws++;
+        }
+        zng_previous_draw.run_length++;
+        if (zng_previous_draw.run_length > zng_bucket.batch_max_run)
+            zng_bucket.batch_max_run = zng_previous_draw.run_length;
+    } else {
+        if (zng_previous_draw.valid) {
+            if (!same_epoch) zng_bucket.batch_state_breaks++;
+            else zng_bucket.batch_signature_breaks++;
+        }
+        zng_previous_draw.run_length = 1;
+    }
+    zng_previous_draw.epoch = zng_state_epoch;
+    zng_previous_draw.mode = mode;
+    zng_previous_draw.type = type;
+    zng_previous_draw.program = program;
+    zng_previous_draw.vao = vao;
+    zng_previous_draw.element_buffer = element_buffer;
+    zng_previous_draw.framebuffer = framebuffer;
+    zng_previous_draw.valid = 1;
 }
 
 void zomdroid_ngtrace_end_enabled(zomdroid_ngtrace_scope_t* scope) {
@@ -257,6 +355,9 @@ void zomdroid_ngtrace_end_enabled(zomdroid_ngtrace_scope_t* scope) {
     if (zng_bucket.bucket_id && zng_bucket.bucket_id != bucket_id) {
         zng_emit_bucket();
         memset(&zng_bucket, 0, sizeof(zng_bucket));
+        // Keep candidate runs wholly inside one reported bucket. Otherwise a run
+        // beginning in an omitted fast bucket would inflate a later slow bucket.
+        zng_previous_draw.valid = 0;
     }
     zng_bucket.bucket_id = bucket_id;
     zng_bucket.total_ns[category] += elapsed_ns;

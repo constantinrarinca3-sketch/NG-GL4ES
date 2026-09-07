@@ -1209,6 +1209,8 @@ AliasExport(void, glColorMask, , (GLboolean red, GLboolean green, GLboolean blue
 
 typedef void (*glColorMaskiEXT_PTR)(GLuint buf, GLboolean r, GLboolean g, GLboolean b, GLboolean a);
 void gl4es_glClear(GLbitfield mask) {
+    // A clear is an ordering barrier even when it leaves every tracked state value unchanged.
+    ZOMDROID_NGTRACE_STATE_BARRIER();
     PUSH_IF_COMPILING(glClear);
 
 //    mask &= GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT;

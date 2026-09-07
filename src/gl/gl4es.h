@@ -42,7 +42,10 @@ extern "C"
     }
 
 #define FLUSH_BEGINEND                                                                                                 \
-    if (glstate->list.pending) gl4es_flush()
+    do {                                                                                                               \
+        ZOMDROID_NGTRACE_STATE_BARRIER();                                                                              \
+        if (glstate->list.pending) gl4es_flush();                                                                      \
+    } while (0)
 
 #define ERROR_IN_BEGIN                                                                                                 \
     if (glstate->list.begin) {                                                                                         \
