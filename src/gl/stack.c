@@ -336,6 +336,7 @@ void APIENTRY_GL4ES gl4es_glPushClientAttrib(GLbitfield mask) {
 #define v4(c) v3(c), c[3]
 
 void APIENTRY_GL4ES gl4es_glPopAttrib(void) {
+    ZOMDROID_DRAW_STATE_BARRIER();
 DBG(SHUT_LOGD("glPopAttrib()\n");)
     noerrorShim();
     if (glstate->list.active)
@@ -622,6 +623,7 @@ DBG(SHUT_LOGD("glPopAttrib()\n");)
     else gl4es_glDisableClientState(pname)
 
 void APIENTRY_GL4ES gl4es_glPopClientAttrib(void) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     DBG(SHUT_LOGD("glPopClientAttrib()\n");)
     noerrorShim();
 	//LOAD_GLES(glVertexPointer);

@@ -109,6 +109,7 @@ void set_fpe_textureidentity() {
 }
 
 void APIENTRY_GL4ES gl4es_glMatrixMode(GLenum mode) {
+    ZOMDROID_DRAW_STATE_BARRIER();
 DBG(SHUT_LOGD("glMatrixMode(%s), list=%p\n", PrintEnum(mode), glstate->list.active);)
 	noerrorShim();
 	if (glstate->list.active && glstate->list.pending && glstate->matrix_mode==GL_MODELVIEW && mode==GL_MODELVIEW) {
@@ -128,6 +129,7 @@ DBG(SHUT_LOGD("glMatrixMode(%s), list=%p\n", PrintEnum(mode), glstate->list.acti
 }
 
 void APIENTRY_GL4ES gl4es_glPushMatrix(void) {
+    ZOMDROID_DRAW_STATE_BARRIER();
 DBG(SHUT_LOGD("glPushMatrix(), list=%p\n", glstate->list.active);)
 	if (glstate->list.active && !glstate->list.pending) {
 		PUSH_IF_COMPILING(glPushMatrix);
@@ -164,6 +166,7 @@ DBG(SHUT_LOGD("glPushMatrix(), list=%p\n", glstate->list.active);)
 }
 
 void APIENTRY_GL4ES gl4es_glPopMatrix(void) {
+    ZOMDROID_DRAW_STATE_BARRIER();
 DBG(SHUT_LOGD("glPopMatrix(), list=%p\n", glstate->list.active);)
 	if (glstate->list.active 
 	 && !(glstate->list.compiling)
@@ -217,6 +220,7 @@ DBG(SHUT_LOGD("glPopMatrix(), list=%p\n", glstate->list.active);)
 }
 
 void APIENTRY_GL4ES gl4es_glLoadMatrixf(const GLfloat * m) {
+    ZOMDROID_DRAW_STATE_BARRIER();
 DBG(SHUT_LOGD("glLoadMatrix(%f, %f, %f, %f, %f, %f, %f...), list=%p\n", m[0], m[1], m[2], m[3], m[4], m[5], m[6], glstate->list.active);)
 	if (glstate->list.active) {
 		if(glstate->list.pending) gl4es_flush();
@@ -244,6 +248,7 @@ DBG(SHUT_LOGD("glLoadMatrix(%f, %f, %f, %f, %f, %f, %f...), list=%p\n", m[0], m[
 }
 
 void APIENTRY_GL4ES gl4es_glMultMatrixf(const GLfloat * m) {
+    ZOMDROID_DRAW_STATE_BARRIER();
 DBG(SHUT_LOGD("glMultMatrix(%f, %f, %f, %f, %f, %f, %f...), list=%p\n", m[0], m[1], m[2], m[3], m[4], m[5], m[6], glstate->list.active);)
 	if (glstate->list.active) {
 		if(glstate->list.pending) gl4es_flush();
@@ -278,6 +283,7 @@ DBG(SHUT_LOGD("glMultMatrix(%f, %f, %f, %f, %f, %f, %f...), list=%p\n", m[0], m[
 }
 
 void APIENTRY_GL4ES gl4es_glLoadIdentity(void) {
+    ZOMDROID_DRAW_STATE_BARRIER();
 DBG(SHUT_LOGD("glLoadIdentity(), list=%p\n", glstate->list.active);)
 	if (glstate->list.active) {
 		if(glstate->list.pending) gl4es_flush();
