@@ -120,6 +120,7 @@ int adjust_vertices(GLenum mode, int nb) {
     }
 
 void APIENTRY_GL4ES gl4es_glVertexPointer(GLint size, GLenum type, GLsizei stride, const GLvoid* pointer) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     DBG(SHUT_LOGD("glVertexPointer(%d, %s, %d, %p)\n", size, PrintEnum(type), stride, pointer);)
     if (size < 1 || size > 4) {
         errorShim(GL_INVALID_VALUE);
@@ -130,6 +131,7 @@ void APIENTRY_GL4ES gl4es_glVertexPointer(GLint size, GLenum type, GLsizei strid
     clone_gl_pointer(glstate->vao->vertexattrib[ATT_VERTEX], size, GL_FALSE);
 }
 void APIENTRY_GL4ES gl4es_glColorPointer(GLint size, GLenum type, GLsizei stride, const GLvoid* pointer) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     DBG((size > 4) ? printf("glColorPointer(%d, %s, %d, %p)\n", size, PrintEnum(type), stride, pointer)
                    : printf("glColorPointer(%s, %s, %d, %p)\n", PrintEnum(size), PrintEnum(type), stride, pointer);)
     if (!((size > 0 && size <= 4) || (size == GL_BGRA && type == GL_UNSIGNED_BYTE))) {
@@ -141,12 +143,14 @@ void APIENTRY_GL4ES gl4es_glColorPointer(GLint size, GLenum type, GLsizei stride
     clone_gl_pointer(glstate->vao->vertexattrib[ATT_COLOR], size, (type == GL_FLOAT) ? GL_FALSE : GL_TRUE);
 }
 void APIENTRY_GL4ES gl4es_glNormalPointer(GLenum type, GLsizei stride, const GLvoid* pointer) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     DBG(SHUT_LOGD("glNormalPointer(%s, %d, %p)\n", PrintEnum(type), stride, pointer);)
     noerrorShimNoPurge();
     break_lockarrays(ATT_NORMAL);
     clone_gl_pointer(glstate->vao->vertexattrib[ATT_NORMAL], 3, GL_FALSE);
 }
 void APIENTRY_GL4ES gl4es_glTexCoordPointer(GLint size, GLenum type, GLsizei stride, const GLvoid* pointer) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     DBG(SHUT_LOGD("glTexCoordPointer(%d, %s, %d, %p), texture.client=%d\n", size, PrintEnum(type), stride, pointer,
                   glstate->texture.client);)
     if (size < 1 || size > 4) {
@@ -158,6 +162,7 @@ void APIENTRY_GL4ES gl4es_glTexCoordPointer(GLint size, GLenum type, GLsizei str
     clone_gl_pointer(glstate->vao->vertexattrib[ATT_MULTITEXCOORD0 + glstate->texture.client], size, GL_FALSE);
 }
 void APIENTRY_GL4ES gl4es_glSecondaryColorPointer(GLint size, GLenum type, GLsizei stride, const GLvoid* pointer) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     DBG((size > 4)
             ? printf("glSecondaryColorPointer(%d, %s, %d, %p)\n", size, PrintEnum(type), stride, pointer)
             : printf("glSecondaryColorPointer(%s, %s, %d, %p)\n", PrintEnum(size), PrintEnum(type), stride, pointer);)
@@ -170,6 +175,7 @@ void APIENTRY_GL4ES gl4es_glSecondaryColorPointer(GLint size, GLenum type, GLsiz
     noerrorShimNoPurge();
 }
 void APIENTRY_GL4ES gl4es_glFogCoordPointer(GLenum type, GLsizei stride, const GLvoid* pointer) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     DBG(SHUT_LOGD("glFogCoordPointer(%s, %d, %p)\n", PrintEnum(type), stride, pointer);)
     if (type == 1 && stride == GL_FLOAT) {
         type = GL_FLOAT;
@@ -295,6 +301,7 @@ AliasExport(void, glInterleavedArrays, , (GLenum format, GLsizei stride, const G
 
 // immediate mode functions
 void APIENTRY_GL4ES gl4es_glBegin(GLenum mode) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     glstate->list.begin = 1;
     if (!glstate->list.active) glstate->list.active = alloc_renderlist();
     // small optim... continue a render command if possible
@@ -340,6 +347,7 @@ void APIENTRY_GL4ES gl4es_glEnd(void) {
 AliasExport(void, glEnd, , ());
 
 void APIENTRY_GL4ES gl4es_glNormal3f(GLfloat nx, GLfloat ny, GLfloat nz) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     if (glstate->list.active) {
         if (glstate->list.active->stage != STAGE_DRAW) {
             if (glstate->list.compiling && glstate->list.active) {
@@ -374,6 +382,7 @@ void APIENTRY_GL4ES gl4es_glNormal3f(GLfloat nx, GLfloat ny, GLfloat nz) {
 AliasExport(void, glNormal3f, , (GLfloat nx, GLfloat ny, GLfloat nz));
 
 void APIENTRY_GL4ES gl4es_glNormal3fv(GLfloat* v) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     if (glstate->list.active) {
         if (glstate->list.active->stage != STAGE_DRAW) {
             if (glstate->list.compiling && glstate->list.active) {
@@ -436,6 +445,7 @@ void APIENTRY_GL4ES gl4es_glVertex4fv(GLfloat* v) {
 AliasExport(void, glVertex4fv, , (GLfloat * v));
 
 void APIENTRY_GL4ES gl4es_glColor4f(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     if (glstate->list.active) {
         if (glstate->list.active->stage != STAGE_DRAW) {
             if (glstate->list.compiling || glstate->list.active->stage < STAGE_DRAW) {
@@ -471,6 +481,7 @@ void APIENTRY_GL4ES gl4es_glColor4f(GLfloat red, GLfloat green, GLfloat blue, GL
 AliasExport(void, glColor4f, , (GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha));
 
 void APIENTRY_GL4ES gl4es_glColor4fv(GLfloat* v) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     if (glstate->list.active) {
         if (glstate->list.active->stage != STAGE_DRAW) {
             if (glstate->list.compiling || glstate->list.active->stage < STAGE_DRAW) {
@@ -497,6 +508,7 @@ void APIENTRY_GL4ES gl4es_glColor4fv(GLfloat* v) {
 AliasExport(void, glColor4fv, , (GLfloat * v));
 
 void APIENTRY_GL4ES gl4es_glSecondaryColor3f(GLfloat r, GLfloat g, GLfloat b) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     if (glstate->list.active) {
         if (glstate->list.pending)
             gl4es_flush();
@@ -519,6 +531,7 @@ AliasExport(void, glSecondaryColor3f, , (GLfloat r, GLfloat g, GLfloat b));
 AliasExport(void, glSecondaryColor3f, EXT, (GLfloat r, GLfloat g, GLfloat b));
 
 void APIENTRY_GL4ES gl4es_glTexCoord4f(GLfloat s, GLfloat t, GLfloat r, GLfloat q) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     if (glstate->list.active) {
         if (glstate->list.pending)
             gl4es_flush();
@@ -539,6 +552,7 @@ void APIENTRY_GL4ES gl4es_glTexCoord4f(GLfloat s, GLfloat t, GLfloat r, GLfloat 
 AliasExport(void, glTexCoord4f, , (GLfloat s, GLfloat t, GLfloat r, GLfloat q));
 
 void APIENTRY_GL4ES gl4es_glMultiTexCoord4f(GLenum target, GLfloat s, GLfloat t, GLfloat r, GLfloat q) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     // TODO, error if target is unsuported texture....
     if (glstate->list.active) {
         if (glstate->list.pending)
@@ -560,6 +574,7 @@ AliasExport(void, glMultiTexCoord4f, , (GLenum target, GLfloat s, GLfloat t, GLf
 AliasExport(void, glMultiTexCoord4f, ARB, (GLenum target, GLfloat s, GLfloat t, GLfloat r, GLfloat q));
 
 void APIENTRY_GL4ES gl4es_glMultiTexCoord2fv(GLenum target, GLfloat* v) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     // TODO, error if target is unsuported texture....
     if (glstate->list.active) {
         if (glstate->list.pending)
@@ -580,6 +595,7 @@ AliasExport(void, glMultiTexCoord2fv, , (GLenum target, GLfloat* v));
 AliasExport(void, glMultiTexCoord2fv, ARB, (GLenum target, GLfloat* v));
 
 void APIENTRY_GL4ES gl4es_glMultiTexCoord4fv(GLenum target, GLfloat* v) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     // TODO, error if target is unsuported texture....
     if (glstate->list.active) {
         if (glstate->list.pending)
@@ -730,6 +746,7 @@ AliasExport(void, glArrayElement, EXT, (GLint i));
 // so I can build a renderlist_t on the first call and hold onto it
 // maybe I need a way to call a renderlist_t with (first, count)
 void APIENTRY_GL4ES gl4es_glLockArrays(GLint first, GLsizei count) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     if (glstate->vao->locked) {
         errorShim(GL_INVALID_OPERATION);
         return;
@@ -741,6 +758,7 @@ void APIENTRY_GL4ES gl4es_glLockArrays(GLint first, GLsizei count) {
 }
 AliasExport(void, glLockArrays, EXT, (GLint first, GLsizei count));
 void APIENTRY_GL4ES gl4es_glUnlockArrays(void) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     if (globals4es.usevbo > 1 && glstate->vao->locked == globals4es.usevbo) UnBuffer();
     glstate->vao->locked = 0;
 
@@ -1141,6 +1159,7 @@ void APIENTRY_GL4ES gl4es_glEdgeFlagPointer(GLsizei stride, const GLvoid* pointe
 AliasExport(void, glEdgeFlagPointer, , (GLsizei stride, const GLvoid* pointer));
 
 void APIENTRY_GL4ES gl4es_glShadeModel(GLenum mode) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     if (mode != GL_SMOOTH && mode != GL_FLAT) {
         errorShim(GL_INVALID_ENUM);
         return;
@@ -1158,6 +1177,7 @@ void APIENTRY_GL4ES gl4es_glShadeModel(GLenum mode) {
 AliasExport(void, glShadeModel, , (GLenum mode));
 
 void APIENTRY_GL4ES gl4es_glAlphaFunc(GLenum func, GLclampf ref) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     PUSH_IF_COMPILING(glAlphaFunc);
     noerrorShim();
     if (ref < 0.0f) ref = 0.0f;
@@ -1179,6 +1199,7 @@ void APIENTRY_GL4ES gl4es_glAlphaFunc(GLenum func, GLclampf ref) {
 AliasExport(void, glAlphaFunc, , (GLenum func, GLclampf ref));
 
 void APIENTRY_GL4ES gl4es_glLogicOp(GLenum opcode) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     PUSH_IF_COMPILING(glLogicOp);
     noerrorShim();
     if (glstate->logicop == opcode) return;
@@ -1193,6 +1214,7 @@ void APIENTRY_GL4ES gl4es_glLogicOp(GLenum opcode) {
 AliasExport(void, glLogicOp, , (GLenum opcode));
 
 void APIENTRY_GL4ES gl4es_glColorMask(GLboolean red, GLboolean green, GLboolean blue, GLboolean alpha) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     PUSH_IF_COMPILING(glColorMask);
     if (glstate->colormask[0] == red && glstate->colormask[1] == green && glstate->colormask[2] == blue &&
         glstate->colormask[3] == alpha) {

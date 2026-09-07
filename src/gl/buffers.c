@@ -191,6 +191,7 @@ void APIENTRY_GL4ES gl4es_glBindBuffer(GLenum target, GLuint buffer) {
 }
 
 void APIENTRY_GL4ES gl4es_glBufferData(GLenum target, GLsizeiptr size, const GLvoid* data, GLenum usage) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     ZOMDROID_NGTRACE_FUNCTION(ZNG_TRACE_BUFFER, 0, size > 0 ? (uint64_t)size : 0);
     DBG(SHUT_LOGD("glBufferData(%s, %zi, %p, %s)\n", PrintEnum(target), size, data, PrintEnum(usage));)
     if (!buffer_target(target)) {
@@ -284,6 +285,7 @@ void APIENTRY_GL4ES gl4es_glBufferData(GLenum target, GLsizeiptr size, const GLv
 }
 
 void APIENTRY_GL4ES gl4es_glNamedBufferData(GLuint buffer, GLsizeiptr size, const GLvoid* data, GLenum usage) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     DBG(SHUT_LOGD("glNamedBufferData(%u, %zi, %p, %s)\n", buffer, size, data, PrintEnum(usage));)
     glbuffer_t* buff = getbuffer_id(buffer);
     if (buff == NULL) {
@@ -339,6 +341,7 @@ void APIENTRY_GL4ES gl4es_glNamedBufferData(GLuint buffer, GLsizeiptr size, cons
 }
 
 void APIENTRY_GL4ES gl4es_glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const GLvoid* data) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     ZOMDROID_NGTRACE_FUNCTION(ZNG_TRACE_BUFFER, 0, size > 0 ? (uint64_t)size : 0);
     DBG(SHUT_LOGD("glBufferSubData(%s, %p, %zi, %p)\n", PrintEnum(target), (void*)offset, size, data);)
     if (!buffer_target(target)) {
@@ -374,6 +377,7 @@ void APIENTRY_GL4ES gl4es_glBufferSubData(GLenum target, GLintptr offset, GLsize
     noerrorShim();
 }
 void APIENTRY_GL4ES gl4es_glNamedBufferSubData(GLuint buffer, GLintptr offset, GLsizeiptr size, const GLvoid* data) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     DBG(SHUT_LOGD("glNamedBufferSubData(%u, %p, %zi, %p)\n", buffer, (void*)offset, size, data);)
     glbuffer_t* buff = getbuffer_id(buffer);
     if (buff == NULL) {
@@ -551,6 +555,7 @@ void buffer_ensure_shadow(glbuffer_t* buff) {
 }
 
 void* APIENTRY_GL4ES gl4es_glMapBuffer(GLenum target, GLenum access) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     DBG(SHUT_LOGD("glMapBuffer(%s, %s)\n", PrintEnum(target), PrintEnum(access));)
     if (!buffer_target(target)) {
         errorShim(GL_INVALID_ENUM);
@@ -582,6 +587,7 @@ void* APIENTRY_GL4ES gl4es_glMapBuffer(GLenum target, GLenum access) {
     return buff->data; // Not nice, should do some copy or something probably
 }
 void* APIENTRY_GL4ES gl4es_glMapNamedBuffer(GLuint buffer, GLenum access) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     DBG(SHUT_LOGD("glMapNamedBuffer(%u, %s)\n", buffer, PrintEnum(access));)
 
     glbuffer_t* buff = getbuffer_id(buffer);
@@ -831,6 +837,7 @@ void APIENTRY_GL4ES gl4es_glGetNamedBufferPointerv(GLuint buffer, GLenum pname, 
 }
 
 void* APIENTRY_GL4ES gl4es_glMapBufferRange(GLenum target, GLintptr offset, GLsizeiptr length, GLbitfield access) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     ZOMDROID_NGTRACE_FUNCTION(ZNG_TRACE_BUFFER, 0, length > 0 ? (uint64_t)length : 0);
     DBG(SHUT_LOGD("glMapBufferRange(%s, %p, %zd, 0x%x)\n", PrintEnum(target), (void*)offset, length, access);)
     if (!buffer_target(target)) {
@@ -979,6 +986,7 @@ void* APIENTRY_GL4ES gl4es_glMapBufferRange(GLenum target, GLintptr offset, GLsi
     return (void*)ret;
 }
 void APIENTRY_GL4ES gl4es_glFlushMappedBufferRange(GLenum target, GLintptr offset, GLsizeiptr length) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     ZOMDROID_NGTRACE_FUNCTION(ZNG_TRACE_BUFFER, 0, length > 0 ? (uint64_t)length : 0);
     DBG(SHUT_LOGD("glFlushMappedBufferRange(%s, %p, %zd)\n", PrintEnum(target), (void*)offset, length);)
     if (!buffer_target(target)) {
@@ -1036,6 +1044,7 @@ void APIENTRY_GL4ES gl4es_glFlushMappedBufferRange(GLenum target, GLintptr offse
 
 void APIENTRY_GL4ES gl4es_glCopyBufferSubData(GLenum readTarget, GLenum writeTarget, GLintptr readOffset,
                                               GLintptr writeOffset, GLsizeiptr size) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     DBG(SHUT_LOGD("glCopyBufferSubData(%s, %s, %p, %p, %zd)\n", PrintEnum(readTarget), PrintEnum(writeTarget),
                   (void*)readOffset, (void*)writeOffset, size);)
 
@@ -1083,6 +1092,7 @@ void APIENTRY_GL4ES gl4es_glCopyBufferSubData(GLenum readTarget, GLenum writeTar
 }
 
 void APIENTRY_GL4ES gl4es_glBindBufferBase(GLenum target, GLuint index, GLuint buffer) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     LOAD_GLES(glBindBufferBase);
     if (!gles_glBindBufferBase) return;
 
@@ -1099,6 +1109,7 @@ void APIENTRY_GL4ES gl4es_glBindBufferBase(GLenum target, GLuint index, GLuint b
 
 void APIENTRY_GL4ES gl4es_glBindBufferRange(GLenum target, GLuint index, GLuint buffer, GLintptr offset,
                                             GLsizeiptr size) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     DBG(SHUT_LOGD("glBindBufferRange(%s, %u, %u, %p, %zd)\n", PrintEnum(target), index, buffer, (void*)offset, size);)
 
     LOAD_GLES(glBindBufferRange);
@@ -1155,6 +1166,7 @@ GLuint APIENTRY_GL4ES gl4es_glGetUniformBlockIndex(GLuint program, const GLchar*
 }
 
 void APIENTRY_GL4ES gl4es_glUniformBlockBinding(GLuint program, GLuint blockIndex, GLuint binding) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     LOAD_GLES(glUniformBlockBinding);
     if (!gles_glUniformBlockBinding) return;
 

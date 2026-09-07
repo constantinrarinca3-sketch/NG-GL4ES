@@ -155,6 +155,7 @@ void zomdroid_fbo_bind_forget(void) {
 }
 
 void APIENTRY_GL4ES gl4es_glDeleteFramebuffers(GLsizei n, GLuint* framebuffers) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     DBG(SHUT_LOGD("glDeleteFramebuffers(%i, %p), framebuffers[0]=%u\n", n, framebuffers, framebuffers[0]);)
     zomdroid_fbo_bind_forget();
     // ZOMDROID FIX (field 2026-08-22): the pass below used to sit inside a second,
@@ -282,6 +283,7 @@ GLenum APIENTRY_GL4ES gl4es_glCheckFramebufferStatus(GLenum target) {
 }
 
 void APIENTRY_GL4ES gl4es_glBindFramebuffer(GLenum target, GLuint framebuffer) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     ZOMDROID_NGTRACE_FUNCTION(ZNG_TRACE_FBO, 0, 0);
     DBG(SHUT_LOGD("glBindFramebuffer(%s, %u), list=%s, glstate->fbo.current_fb=%d (draw=%d, read=%d)\n",
                   PrintEnum(target), framebuffer, glstate->list.active ? "active" : "none", glstate->fbo.current_fb->id,
@@ -522,6 +524,7 @@ int GetAttachmentLevel(glframebuffer_t* fb, GLenum attachment) {
 
 void APIENTRY_GL4ES gl4es_glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget, GLuint texture,
                                                  GLint level) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     DBG(SHUT_LOGD("glFramebufferTexture2D(%s, %s, %s, %u, %i) glstate->fbo.current_fb=%d (draw=%d, read=%d)\n",
                   PrintEnum(target), PrintEnum(attachment), PrintEnum(textarget), texture, level,
                   glstate->fbo.current_fb->id, glstate->fbo.fbo_draw->id, glstate->fbo.fbo_read->id);)
@@ -971,6 +974,7 @@ void APIENTRY_GL4ES gl4es_glGenRenderbuffers(GLsizei n, GLuint* renderbuffers) {
 
 void APIENTRY_GL4ES gl4es_glFramebufferRenderbuffer(GLenum target, GLenum attachment, GLenum renderbuffertarget,
                                                     GLuint renderbuffer) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     DBG(SHUT_LOGD("glFramebufferRenderbuffer(%s, %s, %s, %u)\n", PrintEnum(target), PrintEnum(attachment),
                   PrintEnum(renderbuffertarget), renderbuffer);)
     LOAD_GLES2_OR_OES(glFramebufferRenderbuffer);
@@ -1070,6 +1074,7 @@ void APIENTRY_GL4ES gl4es_glFramebufferRenderbuffer(GLenum target, GLenum attach
 }
 
 void APIENTRY_GL4ES gl4es_glDeleteRenderbuffers(GLsizei n, GLuint* renderbuffers) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     DBG(SHUT_LOGD("glDeleteRenderbuffer(%d, %p)\n", n, renderbuffers);)
     LOAD_GLES2_OR_OES(glDeleteRenderbuffers);
 
@@ -1105,6 +1110,7 @@ void APIENTRY_GL4ES gl4es_glDeleteRenderbuffers(GLsizei n, GLuint* renderbuffers
 }
 
 void APIENTRY_GL4ES gl4es_glRenderbufferStorage(GLenum target, GLenum internalformat, GLsizei width, GLsizei height) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     DBG(SHUT_LOGD("glRenderbufferStorage(%s, %s, %i, %i)\n", PrintEnum(target), PrintEnum(internalformat), width,
                   height);)
     LOAD_GLES2_OR_OES(glRenderbufferStorage);
@@ -1208,6 +1214,7 @@ void APIENTRY_GL4ES gl4es_glRenderbufferStorageMultisample(GLenum target, GLsize
 }
 
 void APIENTRY_GL4ES gl4es_glBindRenderbuffer(GLenum target, GLuint renderbuffer) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     DBG(SHUT_LOGD("glBindRenderbuffer(%s, %u), binded Fbo=%u\n", PrintEnum(target), renderbuffer,
                   glstate->fbo.current_fb->id);)
     LOAD_GLES2_OR_OES(glBindRenderbuffer);
@@ -1235,6 +1242,7 @@ GLboolean APIENTRY_GL4ES gl4es_glIsRenderbuffer(GLuint renderbuffer) {
 }
 
 void APIENTRY_GL4ES gl4es_glGenerateMipmap(GLenum target) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     DBG(SHUT_LOGD("glGenerateMipmap(%s)\n", PrintEnum(target));)
     LOAD_GLES2_OR_OES(glGenerateMipmap);
     LOAD_GLES(glBindTexture);
@@ -1534,6 +1542,7 @@ void gl4es_SwapBuffers_currentContext(); // defined in glx/glx.c
 #endif
 void APIENTRY_GL4ES gl4es_glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0,
                                             GLint dstY0, GLint dstX1, GLint dstY1, GLbitfield mask, GLenum filter) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     ZOMDROID_NGTRACE_FUNCTION(ZNG_TRACE_FBO, 0, 0);
     DBG(SHUT_LOGD("glBlitFramebuffer(%d, %d, %d, %d,  %d, %d, %d, %d,  0x%04X, %s) fbo_read=%d, fbo_draw=%d\n", srcX0,
                   srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, PrintEnum(filter), glstate->fbo.fbo_read->id,
@@ -1657,6 +1666,7 @@ void APIENTRY_GL4ES gl4es_glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX
 }
 
 VISIBLE void glReadBuffer(GLenum src) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     DBG(SHUT_LOGD("glReadBuffer, src:%s", PrintEnum(src));)
     LOAD_GLES3(glReadBuffer);
     gles_glReadBuffer(src);
@@ -1673,6 +1683,7 @@ void gl4es_setCurrentFBO() {
 }
 
 void APIENTRY_GL4ES gl4es_glDrawBuffer(GLenum buffer) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     DBG(SHUT_LOGD("glDrawBuffer, %s", PrintEnum(buffer));)
     LOAD_GLES3(glDrawBuffers)
 
@@ -1716,6 +1727,7 @@ void APIENTRY_GL4ES gl4es_glDrawBuffer(GLenum buffer) {
 
 // DrawBuffers functions are faked unless GL_EXT_draw_buffers is supported
 void APIENTRY_GL4ES gl4es_glDrawBuffers(GLsizei n, const GLenum* bufs) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     DBG(SHUT_LOGD("glDrawBuffers(%d, %p) [0]=%s\n", n, bufs, n ? PrintEnum(bufs[0]) : "nil");)
     if (hardext.drawbuffers) {
         LOAD_GLES3_OR_EXT(glDrawBuffers);
@@ -1732,6 +1744,7 @@ void APIENTRY_GL4ES gl4es_glDrawBuffers(GLsizei n, const GLenum* bufs) {
     noerrorShim();
 }
 void APIENTRY_GL4ES gl4es_glNamedFramebufferDrawBuffers(GLuint framebuffer, GLsizei n, const GLenum* bufs) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     if (n < 0 || n > hardext.maxdrawbuffers) {
         errorShim(GL_INVALID_VALUE);
         return;
@@ -1756,6 +1769,7 @@ void APIENTRY_GL4ES gl4es_glNamedFramebufferDrawBuffers(GLuint framebuffer, GLsi
 // where an attachment enum belongs. Fixed, and on ES3 the native entry point is used
 // directly (counted, so the exit probe tells us whether PZ ever comes here).
 void APIENTRY_GL4ES gl4es_glClearBufferiv(GLenum buffer, GLint drawbuffer, const GLint* value) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     {
         static void (*zncb)(GLenum, GLint, const GLint*) = NULL;
         static int zncb_init = 0;
@@ -1814,6 +1828,7 @@ void APIENTRY_GL4ES gl4es_glClearBufferiv(GLenum buffer, GLint drawbuffer, const
     return;
 }
 void APIENTRY_GL4ES gl4es_glClearBufferuiv(GLenum buffer, GLint drawbuffer, const GLuint* value) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     {
         static void (*zncb)(GLenum, GLint, const GLuint*) = NULL;
         static int zncb_init = 0;
@@ -1860,6 +1875,7 @@ void APIENTRY_GL4ES gl4es_glClearBufferuiv(GLenum buffer, GLint drawbuffer, cons
     return;
 }
 void APIENTRY_GL4ES gl4es_glClearBufferfv(GLenum buffer, GLint drawbuffer, const GLfloat* value) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     {
         static void (*zncb)(GLenum, GLint, const GLfloat*) = NULL;
         static int zncb_init = 0;
@@ -1918,6 +1934,7 @@ void APIENTRY_GL4ES gl4es_glClearBufferfv(GLenum buffer, GLint drawbuffer, const
     return;
 }
 void APIENTRY_GL4ES gl4es_glClearBufferfi(GLenum buffer, GLint drawbuffer, GLfloat depth, GLint stencil) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     {
         static void (*zncb)(GLenum, GLint, GLfloat, GLint) = NULL;
         static int zncb_init = 0;
@@ -1992,6 +2009,7 @@ void APIENTRY_GL4ES gl4es_glColorMaskIndexed(GLuint framebuffer, GLboolean red, 
 typedef void (*glEnableiEXT_PTR)(GLenum target, GLuint index);
 void APIENTRY_GL4ES gl4es_glEnableiEXT(GLenum target, GLuint index)
 {
+    ZOMDROID_DRAW_STATE_BARRIER();
     LOAD_GLES(glEnableiEXT);
     gles_glEnableiEXT(target, index);
 }
@@ -1999,6 +2017,7 @@ void APIENTRY_GL4ES gl4es_glEnableiEXT(GLenum target, GLuint index)
 typedef void (*glDisableiEXT_PTR)(GLenum target, GLuint index);
 void APIENTRY_GL4ES gl4es_glDisableiEXT(GLenum target, GLuint index)
 {
+    ZOMDROID_DRAW_STATE_BARRIER();
     LOAD_GLES(glDisableiEXT);
     gles_glDisableiEXT(target, index);
 }
@@ -2006,6 +2025,7 @@ void APIENTRY_GL4ES gl4es_glDisableiEXT(GLenum target, GLuint index)
 typedef void (*glColorMaskiEXT_PTR)(GLuint buf, GLboolean r, GLboolean g, GLboolean b, GLboolean a);
 void APIENTRY_GL4ES gl4es_glColorMaskiEXT(GLuint buf, GLboolean r, GLboolean g, GLboolean b, GLboolean a)
 {
+    ZOMDROID_DRAW_STATE_BARRIER();
     LOAD_GLES(glColorMaskiEXT);
     gles_glColorMaskiEXT(buf, r, g, b, a);
 }
@@ -2020,6 +2040,7 @@ GLboolean APIENTRY_GL4ES gl4es_glIsEnablediEXT(GLenum target, GLuint index)
 typedef void (*glBlendFunciEXT_PTR)(GLuint buf, GLenum src, GLenum dst);
 void APIENTRY_GL4ES APIENTRY_GL4ES gl4es_glBlendFunciEXT(GLuint buf, GLenum src, GLenum dst)
 {
+    ZOMDROID_DRAW_STATE_BARRIER();
     LOAD_GLES(glBlendFunciEXT);
     gles_glBlendFunciEXT(buf, src, dst);
 }
@@ -2027,6 +2048,7 @@ void APIENTRY_GL4ES APIENTRY_GL4ES gl4es_glBlendFunciEXT(GLuint buf, GLenum src,
 typedef void (*glBlendEquationiEXT_PTR)(GLuint buf, GLenum mode);
 void APIENTRY_GL4ES gl4es_glBlendEquationiEXT(GLuint buf, GLenum mode)
 {
+    ZOMDROID_DRAW_STATE_BARRIER();
     LOAD_GLES(glBlendEquationiEXT);
     gles_glBlendEquationiEXT(buf, mode);
 }
@@ -2034,6 +2056,7 @@ void APIENTRY_GL4ES gl4es_glBlendEquationiEXT(GLuint buf, GLenum mode)
 typedef void (*glBlendFuncSeparateiEXT_PTR)(GLuint buf, GLenum srcRGB, GLenum dstRGB, GLenum srcAlpha, GLenum dstAlpha);
 void APIENTRY_GL4ES gl4es_glBlendFuncSeparateiEXT(GLuint buf, GLenum srcRGB, GLenum dstRGB, GLenum srcAlpha, GLenum dstAlpha)
 {
+    ZOMDROID_DRAW_STATE_BARRIER();
     LOAD_GLES(glBlendFuncSeparateiEXT);
     gles_glBlendFuncSeparateiEXT(buf, srcRGB, dstRGB, srcAlpha, dstAlpha);
 }

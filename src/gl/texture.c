@@ -1033,6 +1033,7 @@ static long zga_texel_bytes(GLenum format, GLenum type) {
 
 void APIENTRY_GL4ES gl4es_glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height,
                                        GLint border, GLenum format, GLenum type, const GLvoid* data) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     ZOMDROID_NGTRACE_FUNCTION(ZNG_TRACE_TEXTURE, 0,
             (width > 0 && height > 0) ? (uint64_t)width * (uint64_t)height * 4ull : 0);
     DBG(SHUT_LOGD(
@@ -2003,6 +2004,7 @@ static size_t pad_to(size_t v, GLint align) {
 
 void APIENTRY_GL4ES gl4es_glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width,
                                           GLsizei height, GLenum format, GLenum type, const GLvoid* data) {
+    ZOMDROID_DRAW_STATE_BARRIER();
     ZOMDROID_NGTRACE_FUNCTION(ZNG_TRACE_TEXTURE, 0,
             (width > 0 && height > 0) ? (uint64_t)width * (uint64_t)height * 4ull : 0);
     if (glstate->list.pending) {

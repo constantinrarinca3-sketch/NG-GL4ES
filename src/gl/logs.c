@@ -519,11 +519,11 @@ static void zomdroid_exit_probe(void) {
     }
     {
         extern long zebo_batch_input, zebo_batch_driver, zebo_batch_saved, zebo_batch_runs;
-        extern long zebo_batch_guard_fallback;
+        extern long zebo_batch_guard_fallback, zebo_batch_state_breaks;
         if (zebo_batch_input || zebo_batch_guard_fallback)
-            zomdroid_gltrace("EBOBATCH session: input=%ld driver=%ld saved=%ld runs=%ld guard-fallback=%ld",
+            zomdroid_gltrace("EBOBATCH session: input=%ld driver=%ld saved=%ld runs=%ld guard-fallback=%ld state-breaks=%ld",
                              zebo_batch_input, zebo_batch_driver, zebo_batch_saved, zebo_batch_runs,
-                             zebo_batch_guard_fallback);
+                             zebo_batch_guard_fallback, zebo_batch_state_breaks);
     }
     {
         extern long zomdroid_etc2_n, zomdroid_etc2_hits, zomdroid_etc2_evicted;

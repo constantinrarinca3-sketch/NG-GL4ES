@@ -45,9 +45,10 @@ extern "C"
     // draw must reach the driver before any state mutation; the trace barrier already marks the
     // same boundary, so keep both operations in one macro used by state-changing entry points.
     void zomdroid_ebo_batch_flush(void);
+    void zomdroid_ebo_batch_state_barrier(void);
 #define ZOMDROID_DRAW_STATE_BARRIER()                                                                                  \
     do {                                                                                                               \
-        zomdroid_ebo_batch_flush();                                                                                    \
+        zomdroid_ebo_batch_state_barrier();                                                                            \
         ZOMDROID_NGTRACE_STATE_BARRIER();                                                                              \
     } while (0)
 

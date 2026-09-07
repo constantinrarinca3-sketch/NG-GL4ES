@@ -54,9 +54,9 @@ static int zebo_enabled(void) {
 // index data. It only joins tiny, contiguous GL_TRIANGLES ranges in the same EBO, so the driver
 // receives one larger direct-EBO draw with exactly the original index order.
 //
-// Every state-changing GL entry point flushes through ZOMDROID_DRAW_STATE_BARRIER. The strict
-// caps bound both latency and the amount of work represented by a queued call. Anything outside
-// these guards stays on the field-proven EBO-direct path below.
+// Draw-state and resource mutations flush through ZOMDROID_DRAW_STATE_BARRIER. The strict caps
+// bound both latency and the amount of work represented by a queued call. Anything outside these
+// guards stays on the field-proven EBO-direct path below.
 #define ZEBO_BATCH_MAX_INPUT_DRAWS 64u
 #define ZEBO_BATCH_MAX_INDICES 384
 #define ZEBO_BATCH_MAX_SINGLE_INDICES 6
@@ -81,6 +81,7 @@ long zebo_batch_driver = 0;
 long zebo_batch_saved = 0;
 long zebo_batch_runs = 0;
 long zebo_batch_guard_fallback = 0;
+long zebo_batch_state_breaks = 0;
 
 static int zebo_batch_enabled(void) {
     static int enabled = -1;
@@ -704,6 +705,12 @@ void zomdroid_ebo_batch_flush(void) {
         }
     }
     glDrawElementsCommon(batch.mode, 0, batch.count, batch.end + 1, sindices, iindices, 1);
+}
+
+void zomdroid_ebo_batch_state_barrier(void) {
+    if (!zebo_batch.pending) return;
+    zebo_batch_state_breaks++;
+    zomdroid_ebo_batch_flush();
 }
 
 #define MIN_BATCH globals4es.minbatch
