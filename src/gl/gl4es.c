@@ -1092,6 +1092,7 @@ void gl4es_flush() {
 extern void BlitEmulatedPixmap(int win);
 #endif
 void APIENTRY_GL4ES gl4es_glFlush(void) {
+    ZOMDROID_NGTRACE_FUNCTION(ZNG_TRACE_SYNC, 0, 0);
     LOAD_GLES(glFlush);
 
     realize_textures(0);
@@ -1108,6 +1109,7 @@ void APIENTRY_GL4ES gl4es_glFlush(void) {
 AliasExport_V(void, glFlush);
 
 void APIENTRY_GL4ES gl4es_glFinish(void) {
+    ZOMDROID_NGTRACE_FUNCTION(ZNG_TRACE_SYNC, 0, 0);
     LOAD_GLES(glFinish);
 
     realize_textures(0);

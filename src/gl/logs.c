@@ -1,8 +1,14 @@
 #include "logs.h"
 #include "init.h"
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <unistd.h>
+#if defined(__linux__)
+#include <sys/syscall.h>
+#endif
 #if defined(ANDROID) && defined(USE_ANDROID_LOG)
 #include <android/log.h>
 #endif
@@ -91,6 +97,173 @@ void zomdroid_gltrace(const char* fmt, ...) {
         fflush(stderr);
     }
     count++;
+}
+
+// ZOMDROID NG FRAME-PATH TRACE ---------------------------------------------------------------
+//
+// The Java all-frame tracer identifies slow RENDER/RTHREAD windows, but cannot say whether the
+// time is GL4ES preparation, a GLES driver call, streaming uploads, FBO work or an explicit GPU
+// wait. This opt-in layer supplies that missing split without changing the normal release path.
+// It uses thread-local fixed storage (no allocator and no locks) and emits at most one compact
+// line per active 16.7 ms bucket. Fast buckets are discarded.
+#define ZNG_BUCKET_NS 16666667ull
+#define ZNG_DEFAULT_THRESHOLD_US 8000ull
+
+int zomdroid_ngtrace_state = -1; // -1 unknown, -2 initializing, 0 off, 1 on
+static uint64_t zng_trace_threshold_ns = ZNG_DEFAULT_THRESHOLD_US * 1000ull;
+
+typedef struct {
+    uint64_t bucket_id;
+    uint64_t total_ns[ZNG_TRACE_CATEGORY_COUNT];
+    uint64_t max_ns[ZNG_TRACE_CATEGORY_COUNT];
+    uint64_t calls[ZNG_TRACE_CATEGORY_COUNT];
+    uint64_t units[ZNG_TRACE_CATEGORY_COUNT];
+    uint64_t bytes[ZNG_TRACE_CATEGORY_COUNT];
+} zng_trace_bucket_t;
+
+static __thread zng_trace_bucket_t zng_bucket;
+static __thread unsigned short zng_depth[ZNG_TRACE_CATEGORY_COUNT];
+
+static uint64_t zng_now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+static long zng_thread_id(void) {
+#if defined(__linux__) && defined(SYS_gettid)
+    return (long)syscall(SYS_gettid);
+#else
+    return (long)getpid();
+#endif
+}
+
+static void zng_write_line(const char* text, size_t length) {
+    while (length) {
+        ssize_t written = write(STDERR_FILENO, text, length);
+        if (written <= 0) return;
+        text += written;
+        length -= (size_t)written;
+    }
+}
+
+static void zng_emit_bucket(void) {
+    if (!zng_bucket.bucket_id) return;
+
+    // DRAW_DRIVER is nested in DRAW_TOTAL, so exclude it from the threshold sum. It remains in
+    // the output: draw-total minus gles-draw is the conversion/setup share we need to distinguish.
+    uint64_t covered_ns = 0;
+    for (int i = 0; i < ZNG_TRACE_CATEGORY_COUNT; ++i)
+        if (i != ZNG_TRACE_DRAW_DRIVER) covered_ns += zng_bucket.total_ns[i];
+    if (covered_ns < zng_trace_threshold_ns) return;
+
+    uint64_t upload_bytes = zng_bucket.bytes[ZNG_TRACE_BUFFER]
+            + zng_bucket.bytes[ZNG_TRACE_TEXTURE];
+    char line[768];
+    int length = snprintf(line, sizeof(line),
+            "[NGTRACE] bucket_ms=%llu tid=%ld covered_us=%llu "
+            "draw=%llu/%llu/%llu glesdraw=%llu/%llu/%llu "
+            "buffer=%llu/%llu/%llu texture=%llu/%llu/%llu "
+            "program=%llu/%llu/%llu fbo=%llu/%llu/%llu sync=%llu/%llu/%llu "
+            "draw_units=%llu upload_bytes=%llu\n",
+            (unsigned long long)((zng_bucket.bucket_id * ZNG_BUCKET_NS) / 1000000ull),
+            zng_thread_id(), (unsigned long long)(covered_ns / 1000ull),
+            (unsigned long long)(zng_bucket.total_ns[ZNG_TRACE_DRAW_TOTAL] / 1000ull),
+            (unsigned long long)zng_bucket.calls[ZNG_TRACE_DRAW_TOTAL],
+            (unsigned long long)(zng_bucket.max_ns[ZNG_TRACE_DRAW_TOTAL] / 1000ull),
+            (unsigned long long)(zng_bucket.total_ns[ZNG_TRACE_DRAW_DRIVER] / 1000ull),
+            (unsigned long long)zng_bucket.calls[ZNG_TRACE_DRAW_DRIVER],
+            (unsigned long long)(zng_bucket.max_ns[ZNG_TRACE_DRAW_DRIVER] / 1000ull),
+            (unsigned long long)(zng_bucket.total_ns[ZNG_TRACE_BUFFER] / 1000ull),
+            (unsigned long long)zng_bucket.calls[ZNG_TRACE_BUFFER],
+            (unsigned long long)(zng_bucket.max_ns[ZNG_TRACE_BUFFER] / 1000ull),
+            (unsigned long long)(zng_bucket.total_ns[ZNG_TRACE_TEXTURE] / 1000ull),
+            (unsigned long long)zng_bucket.calls[ZNG_TRACE_TEXTURE],
+            (unsigned long long)(zng_bucket.max_ns[ZNG_TRACE_TEXTURE] / 1000ull),
+            (unsigned long long)(zng_bucket.total_ns[ZNG_TRACE_PROGRAM] / 1000ull),
+            (unsigned long long)zng_bucket.calls[ZNG_TRACE_PROGRAM],
+            (unsigned long long)(zng_bucket.max_ns[ZNG_TRACE_PROGRAM] / 1000ull),
+            (unsigned long long)(zng_bucket.total_ns[ZNG_TRACE_FBO] / 1000ull),
+            (unsigned long long)zng_bucket.calls[ZNG_TRACE_FBO],
+            (unsigned long long)(zng_bucket.max_ns[ZNG_TRACE_FBO] / 1000ull),
+            (unsigned long long)(zng_bucket.total_ns[ZNG_TRACE_SYNC] / 1000ull),
+            (unsigned long long)zng_bucket.calls[ZNG_TRACE_SYNC],
+            (unsigned long long)(zng_bucket.max_ns[ZNG_TRACE_SYNC] / 1000ull),
+            (unsigned long long)zng_bucket.units[ZNG_TRACE_DRAW_TOTAL],
+            (unsigned long long)upload_bytes);
+    if (length > 0) {
+        size_t safe_length = (size_t)length < sizeof(line) ? (size_t)length : sizeof(line) - 1;
+        zng_write_line(line, safe_length);
+    }
+}
+
+int zomdroid_ngtrace_init(void) {
+    int state = __atomic_load_n(&zomdroid_ngtrace_state, __ATOMIC_ACQUIRE);
+    if (state >= 0) return state;
+    if (state == -2) return 0; // another thread is doing the one-time environment read
+
+    int expected = -1;
+    if (!__atomic_compare_exchange_n(&zomdroid_ngtrace_state, &expected, -2, 0,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        return expected >= 0 ? expected : 0;
+
+    const char* enabled_value = getenv("ZOMDROID_NG_TRACE");
+    int enabled = enabled_value && atoi(enabled_value) != 0;
+    if (enabled) {
+        const char* threshold_value = getenv("ZOMDROID_NG_TRACE_THRESHOLD_US");
+        if (threshold_value && *threshold_value) {
+            unsigned long long threshold_us = strtoull(threshold_value, NULL, 10);
+            if (threshold_us >= 1000ull && threshold_us <= 1000000ull)
+                zng_trace_threshold_ns = threshold_us * 1000ull;
+        }
+    }
+    __atomic_store_n(&zomdroid_ngtrace_state, enabled, __ATOMIC_RELEASE);
+
+    if (enabled) {
+        char line[192];
+        int length = snprintf(line, sizeof(line),
+                "[NGTRACE] enabled bucket_us=%llu slow_bucket_us=%llu output=native.log\n",
+                (unsigned long long)(ZNG_BUCKET_NS / 1000ull),
+                (unsigned long long)(zng_trace_threshold_ns / 1000ull));
+        if (length > 0) zng_write_line(line, (size_t)length);
+    }
+    return enabled;
+}
+
+zomdroid_ngtrace_scope_t zomdroid_ngtrace_begin_enabled(
+        zomdroid_ngtrace_category_t category, uint64_t units, uint64_t bytes) {
+    zomdroid_ngtrace_scope_t scope = {0};
+    if ((unsigned)category >= ZNG_TRACE_CATEGORY_COUNT) return scope;
+    scope.category = (unsigned char)category;
+    scope.active = 1;
+    scope.units = units;
+    scope.bytes = bytes;
+    scope.record = (++zng_depth[category] == 1);
+    if (scope.record) scope.start_ns = zng_now_ns();
+    return scope;
+}
+
+void zomdroid_ngtrace_end_enabled(zomdroid_ngtrace_scope_t* scope) {
+    if (!scope || !scope->active) return;
+    scope->active = 0;
+    unsigned category = scope->category;
+    if (category >= ZNG_TRACE_CATEGORY_COUNT) return;
+    if (zng_depth[category]) --zng_depth[category];
+    if (!scope->record) return;
+
+    uint64_t now_ns = zng_now_ns();
+    uint64_t elapsed_ns = now_ns - scope->start_ns;
+    uint64_t bucket_id = now_ns / ZNG_BUCKET_NS;
+    if (zng_bucket.bucket_id && zng_bucket.bucket_id != bucket_id) {
+        zng_emit_bucket();
+        memset(&zng_bucket, 0, sizeof(zng_bucket));
+    }
+    zng_bucket.bucket_id = bucket_id;
+    zng_bucket.total_ns[category] += elapsed_ns;
+    zng_bucket.calls[category]++;
+    zng_bucket.units[category] += scope->units;
+    zng_bucket.bytes[category] += scope->bytes;
+    if (elapsed_ns > zng_bucket.max_ns[category]) zng_bucket.max_ns[category] = elapsed_ns;
 }
 
 // ZOMDROID MEMDIAG: shadow-copy accounting + process RSS/Swap ground truth.
@@ -262,4 +435,3 @@ void zomdroid_exit_probe_register(void) {
         atexit(zomdroid_exit_probe);
     }
 }
-
