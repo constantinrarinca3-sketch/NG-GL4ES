@@ -800,7 +800,8 @@ void APIENTRY_GL4ES fpe_glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     scratch_t scratch = {0};
     realize_glenv(mode == GL_POINTS, first, count, 0, NULL, &scratch);
     LOAD_GLES(glDrawArrays);
-    gles_glDrawArrays(mode, first, count);
+    ZOMDROID_NGTRACE_CALL(ZNG_TRACE_DRAW_DRIVER, count, 0,
+            gles_glDrawArrays(mode, first, count));
     free_scratch(&scratch);
 }
 
@@ -819,7 +820,8 @@ void APIENTRY_GL4ES fpe_glDrawElements(GLenum mode, GLsizei count, GLenum type, 
         DBG(SHUT_LOGD("Using VBO %d for indices\n", glstate->vao->elements->real_buffer);)
     }
     realize_bufferIndex();
-    gles_glDrawElements(mode, count, type, indices);
+    ZOMDROID_NGTRACE_CALL(ZNG_TRACE_DRAW_DRIVER, count, 0,
+            gles_glDrawElements(mode, count, type, indices));
     if (use_vbo) wantBufferIndex(0);
     free_scratch(&scratch);
 }
@@ -867,7 +869,8 @@ void APIENTRY_GL4ES fpe_glDrawArraysInstanced(GLenum mode, GLint first, GLsizei 
                     }
                 }
             }
-        gles_glDrawArrays(mode, first, count);
+        ZOMDROID_NGTRACE_CALL(ZNG_TRACE_DRAW_DRIVER, count, 0,
+                gles_glDrawArrays(mode, first, count));
     }
     free_scratch(&scratch);
 }
@@ -928,7 +931,8 @@ void APIENTRY_GL4ES fpe_glDrawElementsInstanced(GLenum mode, GLsizei count, GLen
                     }
                 }
             }
-        gles_glDrawElements(mode, count, type, inds);
+        ZOMDROID_NGTRACE_CALL(ZNG_TRACE_DRAW_DRIVER, count, 0,
+                gles_glDrawElements(mode, count, type, inds));
     }
     if (use_vbo) wantBufferIndex(0);
     free_scratch(&scratch);

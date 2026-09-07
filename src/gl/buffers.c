@@ -191,6 +191,7 @@ void APIENTRY_GL4ES gl4es_glBindBuffer(GLenum target, GLuint buffer) {
 }
 
 void APIENTRY_GL4ES gl4es_glBufferData(GLenum target, GLsizeiptr size, const GLvoid* data, GLenum usage) {
+    ZOMDROID_NGTRACE_FUNCTION(ZNG_TRACE_BUFFER, 0, size > 0 ? (uint64_t)size : 0);
     DBG(SHUT_LOGD("glBufferData(%s, %zi, %p, %s)\n", PrintEnum(target), size, data, PrintEnum(usage));)
     if (!buffer_target(target)) {
         errorShim(GL_INVALID_ENUM);
@@ -338,6 +339,7 @@ void APIENTRY_GL4ES gl4es_glNamedBufferData(GLuint buffer, GLsizeiptr size, cons
 }
 
 void APIENTRY_GL4ES gl4es_glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const GLvoid* data) {
+    ZOMDROID_NGTRACE_FUNCTION(ZNG_TRACE_BUFFER, 0, size > 0 ? (uint64_t)size : 0);
     DBG(SHUT_LOGD("glBufferSubData(%s, %p, %zi, %p)\n", PrintEnum(target), (void*)offset, size, data);)
     if (!buffer_target(target)) {
         errorShim(GL_INVALID_ENUM);
@@ -599,6 +601,7 @@ void* APIENTRY_GL4ES gl4es_glMapNamedBuffer(GLuint buffer, GLenum access) {
 }
 
 GLboolean APIENTRY_GL4ES gl4es_glUnmapBuffer(GLenum target) {
+    ZOMDROID_NGTRACE_FUNCTION(ZNG_TRACE_BUFFER, 0, 0);
     DBG(SHUT_LOGD("glUnmapBuffer(%s)\n", PrintEnum(target));)
     if (glstate->list.compiling) {
         errorShim(GL_INVALID_OPERATION);
@@ -828,6 +831,7 @@ void APIENTRY_GL4ES gl4es_glGetNamedBufferPointerv(GLuint buffer, GLenum pname, 
 }
 
 void* APIENTRY_GL4ES gl4es_glMapBufferRange(GLenum target, GLintptr offset, GLsizeiptr length, GLbitfield access) {
+    ZOMDROID_NGTRACE_FUNCTION(ZNG_TRACE_BUFFER, 0, length > 0 ? (uint64_t)length : 0);
     DBG(SHUT_LOGD("glMapBufferRange(%s, %p, %zd, 0x%x)\n", PrintEnum(target), (void*)offset, length, access);)
     if (!buffer_target(target)) {
         errorShim(GL_INVALID_ENUM);
@@ -975,6 +979,7 @@ void* APIENTRY_GL4ES gl4es_glMapBufferRange(GLenum target, GLintptr offset, GLsi
     return (void*)ret;
 }
 void APIENTRY_GL4ES gl4es_glFlushMappedBufferRange(GLenum target, GLintptr offset, GLsizeiptr length) {
+    ZOMDROID_NGTRACE_FUNCTION(ZNG_TRACE_BUFFER, 0, length > 0 ? (uint64_t)length : 0);
     DBG(SHUT_LOGD("glFlushMappedBufferRange(%s, %p, %zd)\n", PrintEnum(target), (void*)offset, length);)
     if (!buffer_target(target)) {
         errorShim(GL_INVALID_ENUM);

@@ -343,6 +343,8 @@ GLuint len_indices(const GLushort* sindices, const GLuint* iindices, GLsizei cou
 
 static void glDrawElementsCommon(GLenum mode, GLint first, GLsizei count, GLuint len, const GLushort* sindices,
                                  const GLuint* iindices, int instancecount) {
+    ZOMDROID_NGTRACE_FUNCTION(ZNG_TRACE_DRAW_TOTAL,
+            (uint64_t)(count > 0 ? count : 0) * (uint64_t)(instancecount > 0 ? instancecount : 1), 0);
     const void* zdirect = zebo_offset;
     int zdirect_ok = zebo_armed;
     zebo_armed = 0; // consumed here whatever happens below

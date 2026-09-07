@@ -282,6 +282,7 @@ GLenum APIENTRY_GL4ES gl4es_glCheckFramebufferStatus(GLenum target) {
 }
 
 void APIENTRY_GL4ES gl4es_glBindFramebuffer(GLenum target, GLuint framebuffer) {
+    ZOMDROID_NGTRACE_FUNCTION(ZNG_TRACE_FBO, 0, 0);
     DBG(SHUT_LOGD("glBindFramebuffer(%s, %u), list=%s, glstate->fbo.current_fb=%d (draw=%d, read=%d)\n",
                   PrintEnum(target), framebuffer, glstate->list.active ? "active" : "none", glstate->fbo.current_fb->id,
                   glstate->fbo.fbo_draw->id, glstate->fbo.fbo_read->id);)
@@ -1533,6 +1534,7 @@ void gl4es_SwapBuffers_currentContext(); // defined in glx/glx.c
 #endif
 void APIENTRY_GL4ES gl4es_glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0,
                                             GLint dstY0, GLint dstX1, GLint dstY1, GLbitfield mask, GLenum filter) {
+    ZOMDROID_NGTRACE_FUNCTION(ZNG_TRACE_FBO, 0, 0);
     DBG(SHUT_LOGD("glBlitFramebuffer(%d, %d, %d, %d,  %d, %d, %d, %d,  0x%04X, %s) fbo_read=%d, fbo_draw=%d\n", srcX0,
                   srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, PrintEnum(filter), glstate->fbo.fbo_read->id,
                   glstate->fbo.fbo_draw->id);)

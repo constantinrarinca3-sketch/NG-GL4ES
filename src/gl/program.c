@@ -960,6 +960,7 @@ void APIENTRY_GL4ES gl4es_glProgramBinary(GLuint program, GLenum binaryFormat, c
 }
 
 void APIENTRY_GL4ES gl4es_glLinkProgram(GLuint program) {
+    ZOMDROID_NGTRACE_FUNCTION(ZNG_TRACE_PROGRAM, 0, 0);
     DBG(SHUT_LOGD("glLinkProgram(%d)\n", program))
     FLUSH_BEGINEND;
     CHECK_PROGRAM(void, program)
@@ -1182,6 +1183,7 @@ void APIENTRY_GL4ES gl4es_glLinkProgram(GLuint program) {
 }
 
 void APIENTRY_GL4ES gl4es_glUseProgram(GLuint program) {
+    ZOMDROID_NGTRACE_FUNCTION(ZNG_TRACE_PROGRAM, 0, 0);
     DBG(SHUT_LOGD("glUseProgram(%d) old=%d\n", program, glstate->glsl->program))
     PUSH_IF_COMPILING(glUseProgram);
     if (program == 0) {
