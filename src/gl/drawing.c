@@ -46,6 +46,117 @@ static int zebo_enabled(void) {
     return z;
 }
 
+// ZOMDROID SAFE EBO BATCH ---------------------------------------------------------------
+//
+// GL4ES' LIBGL_BATCH path builds a CPU render list. Project Zomboid supplies the `indices`
+// argument as an offset into a native element buffer; the stock path consequently dereferences
+// offsets such as 0x28 as CPU addresses and crashes. This independent path never reads or copies
+// index data. It only joins tiny, contiguous GL_TRIANGLES ranges in the same EBO, so the driver
+// receives one larger direct-EBO draw with exactly the original index order.
+//
+// Every state-changing GL entry point flushes through ZOMDROID_DRAW_STATE_BARRIER. The strict
+// caps bound both latency and the amount of work represented by a queued call. Anything outside
+// these guards stays on the field-proven EBO-direct path below.
+#define ZEBO_BATCH_MAX_INPUT_DRAWS 64u
+#define ZEBO_BATCH_MAX_INDICES 384
+#define ZEBO_BATCH_MAX_SINGLE_INDICES 6
+
+typedef struct {
+    int pending;
+    GLenum mode;
+    GLenum type;
+    GLuint start;
+    GLuint end;
+    GLsizei count;
+    uintptr_t first_offset;
+    uintptr_t next_offset;
+    GLuint real_buffer;
+    glvao_t* vao;
+    unsigned input_draws;
+} zebo_batch_t;
+
+static __thread zebo_batch_t zebo_batch;
+long zebo_batch_input = 0;
+long zebo_batch_driver = 0;
+long zebo_batch_saved = 0;
+long zebo_batch_runs = 0;
+long zebo_batch_guard_fallback = 0;
+
+static int zebo_batch_enabled(void) {
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char* value = getenv("ZOMDROID_NG_EBO_BATCH");
+        enabled = value && atoi(value) != 0;
+        if (enabled)
+            zomdroid_gltrace("EBOBATCH enabled: contiguous triangles, max-input=%u max-indices=%d",
+                             ZEBO_BATCH_MAX_INPUT_DRAWS, ZEBO_BATCH_MAX_INDICES);
+    }
+    return enabled;
+}
+
+static size_t zebo_batch_index_size(GLenum type) {
+    if (type == GL_UNSIGNED_SHORT) return sizeof(GLushort);
+    if (type == GL_UNSIGNED_INT) return sizeof(GLuint);
+    return 0;
+}
+
+static int zebo_batch_is_eligible(GLenum mode, GLsizei count, GLenum type, const void* indices,
+                                  int intercept) {
+    if (!zebo_batch_enabled() || globals4es.maxbatch != 0) return 0;
+    if (mode != GL_TRIANGLES || count <= 0 || count > ZEBO_BATCH_MAX_SINGLE_INDICES || count % 3) return 0;
+    if (intercept || hardext.esversion <= 1 || glstate->render_mode == GL_SELECT) return 0;
+    if (glstate->list.active || glstate->list.pending || !zebo_enabled()) return 0;
+    if (!glstate->vao || !glstate->vao->elements || !glstate->vao->elements->real_buffer ||
+        !glstate->vao->elements->data)
+        return 0;
+
+    size_t index_size = zebo_batch_index_size(type);
+    uintptr_t offset = (uintptr_t)indices;
+    if (!index_size || (offset % index_size)) return 0;
+    uint64_t buffer_size = glstate->vao->elements->size > 0
+            ? (uint64_t)glstate->vao->elements->size : 0;
+    uint64_t bytes = (uint64_t)count * index_size;
+    if ((uint64_t)offset > buffer_size || bytes > buffer_size - (uint64_t)offset) return 0;
+    if (type == GL_UNSIGNED_INT && !hardext.elementuint) return 0;
+    return 1;
+}
+
+static void zebo_batch_begin(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type,
+                             const void* indices) {
+    size_t index_size = zebo_batch_index_size(type);
+    zebo_batch.pending = 1;
+    zebo_batch.mode = mode;
+    zebo_batch.type = type;
+    zebo_batch.start = start;
+    zebo_batch.end = end;
+    zebo_batch.count = count;
+    zebo_batch.first_offset = (uintptr_t)indices;
+    zebo_batch.next_offset = zebo_batch.first_offset + (uintptr_t)count * index_size;
+    zebo_batch.real_buffer = glstate->vao->elements->real_buffer;
+    zebo_batch.vao = glstate->vao;
+    zebo_batch.input_draws = 1;
+    zebo_batch_input++;
+}
+
+static int zebo_batch_append(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type,
+                             const void* indices) {
+    if (!zebo_batch.pending || zebo_batch.mode != mode || zebo_batch.type != type ||
+        zebo_batch.vao != glstate->vao || !glstate->vao->elements ||
+        zebo_batch.real_buffer != glstate->vao->elements->real_buffer ||
+        zebo_batch.next_offset != (uintptr_t)indices ||
+        zebo_batch.input_draws >= ZEBO_BATCH_MAX_INPUT_DRAWS ||
+        zebo_batch.count > ZEBO_BATCH_MAX_INDICES - count)
+        return 0;
+
+    zebo_batch.start = start < zebo_batch.start ? start : zebo_batch.start;
+    zebo_batch.end = end > zebo_batch.end ? end : zebo_batch.end;
+    zebo_batch.count += count;
+    zebo_batch.next_offset += (uintptr_t)count * zebo_batch_index_size(type);
+    zebo_batch.input_draws++;
+    zebo_batch_input++;
+    return 1;
+}
+
 static GLboolean is_cache_compatible(GLsizei count) {
 #define T2(AA, A, B)                                                                                                   \
     if (glstate->vao->AA != glstate->vao->B.enabled) return GL_FALSE;                                                  \
@@ -343,6 +454,9 @@ GLuint len_indices(const GLushort* sindices, const GLuint* iindices, GLsizei cou
 
 static void glDrawElementsCommon(GLenum mode, GLint first, GLsizei count, GLuint len, const GLushort* sindices,
                                  const GLuint* iindices, int instancecount) {
+    // A different draw is an ordering boundary for a queued range batch. The batch flush clears
+    // `pending` before re-entering this function, so this cannot recurse.
+    if (zebo_batch.pending) zomdroid_ebo_batch_flush();
     ZOMDROID_NGTRACE_FUNCTION(ZNG_TRACE_DRAW_TOTAL,
             (uint64_t)(count > 0 ? count : 0) * (uint64_t)(instancecount > 0 ? instancecount : 1), 0);
     const void* zdirect = zebo_offset;
@@ -551,6 +665,47 @@ if(count>500000) return;
     }
 }
 
+void zomdroid_ebo_batch_flush(void) {
+    if (!zebo_batch.pending) return;
+
+    // Clear first: glDrawElementsCommon is also the universal draw-order barrier.
+    zebo_batch_t batch = zebo_batch;
+    memset(&zebo_batch, 0, sizeof(zebo_batch));
+
+    // All mutating entry points flush before changing state. Keep a final guard anyway: a stale
+    // context/VAO must fall back without dereferencing a dead shadow buffer.
+    size_t index_size = zebo_batch_index_size(batch.type);
+    uint64_t bytes = (uint64_t)batch.count * index_size;
+    if (!glstate || glstate->vao != batch.vao || !batch.vao || !batch.vao->elements ||
+        batch.vao->elements->real_buffer != batch.real_buffer || !batch.vao->elements->data ||
+        batch.vao->elements->size <= 0 ||
+        (uint64_t)batch.first_offset > (uint64_t)batch.vao->elements->size ||
+        bytes > (uint64_t)batch.vao->elements->size - (uint64_t)batch.first_offset) {
+        zebo_batch_guard_fallback++;
+        zomdroid_gltrace("EBOBATCH guard rejected queued draw: vao/ebo changed");
+        return;
+    }
+
+    const char* shadow = (const char*)batch.vao->elements->data + batch.first_offset;
+    const GLushort* sindices = batch.type == GL_UNSIGNED_SHORT ? (const GLushort*)shadow : NULL;
+    const GLuint* iindices = batch.type == GL_UNSIGNED_INT ? (const GLuint*)shadow : NULL;
+
+    zebo_offset = (const void*)batch.first_offset;
+    zebo_armed = 1;
+    zebo_batch_driver++;
+    if (batch.input_draws > 1) {
+        zebo_batch_runs++;
+        zebo_batch_saved += (long)batch.input_draws - 1;
+        static long next_step = 1000000;
+        if (zebo_batch_saved >= next_step) {
+            next_step += 1000000;
+            zomdroid_gltrace("EBOBATCH step: input=%ld driver=%ld saved=%ld runs=%ld",
+                             zebo_batch_input, zebo_batch_driver, zebo_batch_saved, zebo_batch_runs);
+        }
+    }
+    glDrawElementsCommon(batch.mode, 0, batch.count, batch.end + 1, sindices, iindices, 1);
+}
+
 #define MIN_BATCH globals4es.minbatch
 #define MAX_BATCH globals4es.maxbatch
 
@@ -571,6 +726,22 @@ void APIENTRY_GL4ES gl4es_glDrawRangeElements(GLenum mode, GLuint start, GLuint 
 
     bool compiling = (glstate->list.active);
     bool intercept = should_intercept_render(mode);
+
+    // Do not enter GL4ES' CPU render-list batching. Queue only a native-EBO-safe candidate and
+    // combine it when the next call is byte-contiguous; every other case flushes through the
+    // unchanged EBO-direct implementation.
+    if (zebo_batch_is_eligible(mode, count, type, indices, intercept)) {
+        zebo_try_dre++;
+        if (!zebo_batch.pending) {
+            zebo_batch_begin(mode, start, end, count, type, indices);
+        } else if (!zebo_batch_append(mode, start, end, count, type, indices)) {
+            zomdroid_ebo_batch_flush();
+            zebo_batch_begin(mode, start, end, count, type, indices);
+        }
+        noerrorShim();
+        return;
+    }
+    zomdroid_ebo_batch_flush();
 
     // BATCH Mode
     if (!compiling) {

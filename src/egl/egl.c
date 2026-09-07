@@ -191,6 +191,10 @@ EGLBoolean gl4es_eglWaitNative(EGLint engine) {
 
 EGLBoolean gl4es_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
     LOAD_EGL(eglSwapBuffers);
+    // Native GLFW can reach this wrapper without the GLX shim. Flush the opt-in EBO batch before
+    // presentation so the final draw of a frame can never be delayed into the next one.
+    extern void zomdroid_ebo_batch_flush(void);
+    zomdroid_ebo_batch_flush();
     return egl_eglSwapBuffers(dpy, surface);
 }
 

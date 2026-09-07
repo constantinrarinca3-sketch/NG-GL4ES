@@ -1506,6 +1506,7 @@ void gl4es_glXSwapBuffers(Display *display,
     static int frames = 0;
     DBG(SHUT_LOGD("\rglXSwapBuffers(%p, %p) ", display, (void*)drawable);)
     LOAD_EGL(eglSwapBuffers);
+    zomdroid_ebo_batch_flush();
     // TODO: what if active context is not on the drawable?
     realize_textures(0);
     if (glstate->list.active){

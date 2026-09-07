@@ -1208,7 +1208,7 @@ void realize_glenv(int ispoint, int first, int count, GLenum type, const void* i
             DBG(SHUT_LOGD("LIBGL: Need to Bind/Unbind FBO!");)
             // The feedback-loop workaround inserts real driver commands between draws;
             // never classify a sequence crossing it as a batch candidate.
-            ZOMDROID_NGTRACE_STATE_BARRIER();
+            ZOMDROID_DRAW_STATE_BARRIER();
             LOAD_GLES2_OR_OES(glBindFramebuffer);
             LOAD_GLES2_OR_OES(glFramebufferTexture2D);
             // gles_glFramebufferTexture2D(GL_FRAMEBUFFER, tex->binded_attachment, GL_TEXTURE_2D, 0, 0);

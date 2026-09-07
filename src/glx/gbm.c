@@ -360,6 +360,7 @@ EGLBoolean GBMMakeCurrent(EGLDisplay eglDisp, EGLSurface draw, EGLSurface read, 
         return res;
     }
 
+    zomdroid_ebo_batch_flush();
     egl_eglSwapBuffers(eglDisp, draw);
     struct gbm_bo *bo = gbmdrm_gbm_surface_lock_front_buffer(gbmsurf);
     if(!bo) {

@@ -41,9 +41,19 @@ extern "C"
         if ((error = glGetError())) SHUT_LOGD(file ":%i -> %i\n", line, error);                                        \
     }
 
+    // The safe EBO batch is deliberately separate from GL4ES' render-list batching. A queued
+    // draw must reach the driver before any state mutation; the trace barrier already marks the
+    // same boundary, so keep both operations in one macro used by state-changing entry points.
+    void zomdroid_ebo_batch_flush(void);
+#define ZOMDROID_DRAW_STATE_BARRIER()                                                                                  \
+    do {                                                                                                               \
+        zomdroid_ebo_batch_flush();                                                                                    \
+        ZOMDROID_NGTRACE_STATE_BARRIER();                                                                              \
+    } while (0)
+
 #define FLUSH_BEGINEND                                                                                                 \
     do {                                                                                                               \
-        ZOMDROID_NGTRACE_STATE_BARRIER();                                                                              \
+        ZOMDROID_DRAW_STATE_BARRIER();                                                                                 \
         if (glstate->list.pending) gl4es_flush();                                                                      \
     } while (0)
 

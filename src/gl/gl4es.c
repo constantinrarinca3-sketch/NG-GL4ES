@@ -1075,6 +1075,7 @@ void APIENTRY_GL4ES gl4es_glPolygonMode(GLenum face, GLenum mode) {
 AliasExport(void, glPolygonMode, , (GLenum face, GLenum mode));
 
 void gl4es_flush() {
+    zomdroid_ebo_batch_flush();
     if (glstate->list.compiling) return;
     // flush internal list
     renderlist_t* mylist = glstate->list.active ? extend_renderlist(glstate->list.active) : NULL;
@@ -1210,7 +1211,7 @@ AliasExport(void, glColorMask, , (GLboolean red, GLboolean green, GLboolean blue
 typedef void (*glColorMaskiEXT_PTR)(GLuint buf, GLboolean r, GLboolean g, GLboolean b, GLboolean a);
 void gl4es_glClear(GLbitfield mask) {
     // A clear is an ordering barrier even when it leaves every tracked state value unchanged.
-    ZOMDROID_NGTRACE_STATE_BARRIER();
+    ZOMDROID_DRAW_STATE_BARRIER();
     PUSH_IF_COMPILING(glClear);
 
 //    mask &= GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT;
@@ -1379,6 +1380,7 @@ void amiga_pre_swap()
 NonAliasExportDecl(void, gl4es_pre_swap, ())
 #endif
 {
+    zomdroid_ebo_batch_flush();
     if (glstate->list.active) gl4es_flush();
     if (glstate->raster.bm_drawing) bitmap_flush();
 

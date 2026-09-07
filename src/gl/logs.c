@@ -82,7 +82,7 @@ void zomdroid_gltrace(const char* fmt, ...) {
         fputc('\n', f);
         if (!strncmp(fmt, "INIT", 4) || !strncmp(fmt, "MEMSTAT", 7) || !strncmp(fmt, "EXIT", 4) ||
             !strncmp(fmt, "GLALLOC exit", 12) || !strncmp(fmt, "CCACHE", 6) || !strncmp(fmt, "FBO", 3) ||
-            !strncmp(fmt, "DRAWMIX", 7))
+            !strncmp(fmt, "DRAWMIX", 7) || !strncmp(fmt, "EBOBATCH", 8))
             fflush(f);
     }
     // ZOMDROID DIAG: mirror to stderr — it lands in the console log that testers can
@@ -516,6 +516,14 @@ static void zomdroid_exit_probe(void) {
                          " via-DrawElements=%ld via-RangeElements=%ld",
                          zdrawmix_total, zdrawmix_quads, zdrawmix_ebo, zdrawmix_direct, zdrawmix_inst, zebo_used,
                          zebo_try_de, zebo_try_dre);
+    }
+    {
+        extern long zebo_batch_input, zebo_batch_driver, zebo_batch_saved, zebo_batch_runs;
+        extern long zebo_batch_guard_fallback;
+        if (zebo_batch_input || zebo_batch_guard_fallback)
+            zomdroid_gltrace("EBOBATCH session: input=%ld driver=%ld saved=%ld runs=%ld guard-fallback=%ld",
+                             zebo_batch_input, zebo_batch_driver, zebo_batch_saved, zebo_batch_runs,
+                             zebo_batch_guard_fallback);
     }
     {
         extern long zomdroid_etc2_n, zomdroid_etc2_hits, zomdroid_etc2_evicted;

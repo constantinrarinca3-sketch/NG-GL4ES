@@ -210,7 +210,7 @@ void GoUniformfv(program_t* glprogram, GLint location, int size, int count, cons
         return; // nothing to do, same value already there
     }
     // update uniform
-    ZOMDROID_NGTRACE_STATE_BARRIER();
+    ZOMDROID_DRAW_STATE_BARRIER();
     memcpy((char*)glprogram->cache.cache + m->cache_offs, value, rsize);
     LOAD_GLES2(glUniform1fv);
     LOAD_GLES2(glUniform2fv);
@@ -268,7 +268,7 @@ void GoUniformiv(program_t* glprogram, GLint location, int size, int count, cons
     DBG(SHUT_LOGD("Uniform updated, cache=%p(%d/%d), offset=%p, size=%d\n", glprogram->cache.cache,
                   glprogram->cache.size, glprogram->cache.cap, (void*)m->cache_offs, rsize);)
     // update uniform
-    ZOMDROID_NGTRACE_STATE_BARRIER();
+    ZOMDROID_DRAW_STATE_BARRIER();
     memcpy((char*)glprogram->cache.cache + m->cache_offs, value, rsize);
     LOAD_GLES2(glUniform1iv);
     LOAD_GLES2(glUniform2iv);
@@ -610,7 +610,7 @@ void GoUniformMatrix2fv(program_t* glprogram, GLint location, GLsizei count, GLb
         return; // nothing to do, same value already there
     }
     // update uniform
-    ZOMDROID_NGTRACE_STATE_BARRIER();
+    ZOMDROID_DRAW_STATE_BARRIER();
     memcpy((char*)glprogram->cache.cache + m->cache_offs, v, rsize);
     LOAD_GLES2(glUniformMatrix2fv);
     if (gles_glUniformMatrix2fv) {
@@ -686,7 +686,7 @@ void GoUniformMatrix3fv(program_t* glprogram, GLint location, GLsizei count, GLb
         return; // nothing to do, same value already there
     }
     // update uniform
-    ZOMDROID_NGTRACE_STATE_BARRIER();
+    ZOMDROID_DRAW_STATE_BARRIER();
     memcpy((char*)glprogram->cache.cache + m->cache_offs, v, rsize);
     LOAD_GLES2(glUniformMatrix3fv);
     if (gles_glUniformMatrix3fv) {
@@ -761,7 +761,7 @@ void GoUniformMatrix4fv(program_t* glprogram, GLint location, GLsizei count, GLb
         return; // nothing to do, same value already there
     }
     // update uniform
-    ZOMDROID_NGTRACE_STATE_BARRIER();
+    ZOMDROID_DRAW_STATE_BARRIER();
     memcpy((char*)glprogram->cache.cache + m->cache_offs, v, rsize);
     LOAD_GLES2(glUniformMatrix4fv);
     if (gles_glUniformMatrix4fv) {

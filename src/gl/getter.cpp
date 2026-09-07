@@ -31,6 +31,9 @@ extern "C"
 #define DBG(a)
 #endif
     GLenum APIENTRY_GL4ES gl4es_glGetError(void) {
+        // Preserve OpenGL error ordering: a deferred EBO draw must execute before its error is
+        // queried, just as it must execute before any state mutation.
+        zomdroid_ebo_batch_flush();
         DBG(SHUT_LOGD("glGetError(), noerror=%d, type_error=%d shim_error=%s\n", globals4es.noerror,
                       glstate->type_error, PrintEnum(glstate->shim_error));)
         if (globals4es.noerror) return GL_NO_ERROR;
